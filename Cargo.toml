@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/schema", "crates/data"]
+members = ["crates/schema", "crates/data", "crates/engine"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

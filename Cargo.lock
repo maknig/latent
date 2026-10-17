@@ -90,6 +90,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fa-engine"
+version = "0.1.0"
+dependencies = [
+ "fa-data",
+ "fa-schema",
+]
+
+[[package]]
 name = "fa-schema"
 version = "0.1.0"
 dependencies = [

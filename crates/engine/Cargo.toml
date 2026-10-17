@@ -1,0 +1,8 @@
+[package]
+name = "fa-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fa-schema = { path = "../schema" }
+fa-data = { path = "../data" }
