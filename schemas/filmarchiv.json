@@ -1,0 +1,55 @@
+{
+  "name": "FilmArchiv",
+  "version": 1,
+  "tables": [
+    {
+      "name": "roll_film", "label": "Rollfilme",
+      "fields": [
+        {"name": "id", "type": "id", "label": "ID", "readonly": true},
+        {"name": "date", "type": "date", "label": "Datum", "format": "%d.%m.%Y", "default": "today"},
+        {"name": "film_name", "type": "text", "label": "Film", "required": true},
+        {"name": "format", "type": "enum", "label": "Film Type", "options": ["35mm", "120", "4x5", "8x10"]},
+        {"name": "camera", "type": "text", "label": "Kamera"},
+        {"name": "iso", "type": "int", "label": "ISO", "min": 1, "max": 6400},
+        {"name": "developer", "type": "text", "label": "Entwickler"},
+        {"name": "dev_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
+        {"name": "dev_temp", "type": "float", "label": "Temperatur", "decimals": 1, "unit": "°C"},
+        {"name": "motiv", "type": "text", "label": "Motiv", "multiline": true}
+      ]
+    },
+    {
+      "name": "plan_film", "label": "Planfilme",
+      "fields": [
+        {"name": "id", "type": "id", "label": "ID", "readonly": true},
+        {"name": "date", "type": "date", "label": "Datum", "format": "%d.%m.%Y", "default": "today"},
+        {"name": "film_name", "type": "text", "label": "Film", "required": true},
+        {"name": "format", "type": "enum", "label": "Film Type", "options": ["35mm", "120", "4x5", "8x10"]},
+        {"name": "camera", "type": "text", "label": "Kamera"},
+        {"name": "lens", "type": "text", "label": "Objektiv"},
+        {"name": "shutter", "type": "text", "label": "Verschluss"},
+        {"name": "aperture", "type": "text", "label": "Blende"},
+        {"name": "notes", "type": "text", "label": "Notizen", "multiline": true},
+        {"name": "iso", "type": "int", "label": "ISO", "min": 1, "max": 6400},
+        {"name": "developer", "type": "text", "label": "Entwickler"},
+        {"name": "dev_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
+        {"name": "dev_temp", "type": "float", "label": "Temperatur", "decimals": 1, "unit": "°C"},
+        {"name": "motiv", "type": "text", "label": "Motiv", "multiline": true}
+      ]
+    },
+    {
+      "name": "enlargement", "label": "Vergrösserungen",
+      "fields": [
+        {"name": "date", "type": "date", "label": "Datum", "format": "%d.%m.%Y", "default": "today"},
+        {"name": "enlarger", "type": "text", "label": "Vergrösserer"},
+        {"name": "lens", "type": "text", "label": "Objektiv"},
+        {"name": "aperture", "type": "text", "label": "Blende"},
+        {"name": "exposure_time", "type": "time", "label": "Belichtungszeit", "format": "%M:%S"},
+        {"name": "enlarger_height", "type": "text", "label": "Höhe"},
+        {"name": "paper", "type": "text", "label": "Papier"},
+        {"name": "developer", "type": "text", "label": "Entwickler"},
+        {"name": "develop_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
+        {"name": "notice", "type": "text", "label": "Notizen", "multiline": true}
+      ]
+    }
+  ]
+}

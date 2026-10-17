@@ -1,0 +1,12 @@
+[package]
+name = "fa-data"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fa-schema = { path = "../schema" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+csv.workspace = true
+thiserror.workspace = true
