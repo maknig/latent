@@ -1,9 +1,9 @@
 //! Typed values, rows and tables driven by an `fa-schema` schema, plus CSV/JSON IO.
 use chrono::NaiveDate;
 use fa_schema::{Field, FieldType, Schema, Table};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {
@@ -148,6 +148,14 @@ pub struct Row {
     /// Stable auto-increment key (also the value of the `id` field, if any).
     pub id: u64,
     pub values: Vec<Value>,
+    /// Values for keys the schema does not know (kept until purged).
+    pub orphans: BTreeMap<String, Json>,
+}
+
+impl Row {
+    pub fn new(id: u64, values: Vec<Value>) -> Row {
+        Row { id, values, orphans: BTreeMap::new() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,7 +182,7 @@ impl TableData {
         if let Some(i) = table.id_index() {
             values[i] = Value::Int(id as i64);
         }
-        self.rows.push(Row { id, values });
+        self.rows.push(Row::new(id, values));
         id
     }
 
@@ -226,7 +234,7 @@ impl TableData {
                 Some(Value::Int(id)) if *id > 0 => {
                     let id = *id as u64;
                     td.next_id = td.next_id.max(id + 1);
-                    td.rows.push(Row { id, values });
+                    td.rows.push(Row::new(id, values));
                 }
                 _ => {
                     td.insert(table, values);
@@ -242,82 +250,148 @@ impl TableData {
 pub struct Store {
     pub schema: Schema,
     pub tables: Vec<TableData>,
+    /// Data tables the schema does not know; kept and written back.
+    pub orphan_tables: BTreeMap<String, Json>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct FileFormat {
-    schema: Schema,
-    data: Vec<FileTable>,
+/// Cell encoding in the data file: ISO dates, `mm:ss` times.
+fn cell_to_json(v: &Value, f: &Field) -> Json {
+    match v {
+        Value::Time(t) => json!(format_time(*t, f.time_format())),
+        other => to_json(other),
+    }
 }
-#[derive(Serialize, Deserialize)]
-struct FileTable {
-    table: String,
-    next_id: u64,
-    rows: Vec<Vec<Json>>,
+
+fn cell_from_json(j: &Json, f: &Field) -> Result<Value, DataError> {
+    match (j, f.ty) {
+        (Json::String(s), FieldType::Time) => parse_time(s, f.time_format())
+            .map(Value::Time)
+            .ok_or_else(|| DataError::Parse(format!("field '{}': invalid time '{s}'", f.name))),
+        (Json::Number(n), FieldType::Float) if n.as_f64().is_some() => from_json(j, f),
+        _ => from_json(j, f),
+    }
 }
 
 impl Store {
     pub fn new(schema: Schema) -> Store {
         let tables = schema.tables.iter().map(|t| TableData::new(&t.name)).collect();
-        Store { schema, tables }
+        Store { schema, tables, orphan_tables: BTreeMap::new() }
     }
 
     pub fn table_data(&self, name: &str) -> Option<&TableData> {
         self.tables.iter().find(|t| t.name == name)
     }
 
-    pub fn to_json(&self) -> String {
-        let data = self
-            .tables
-            .iter()
-            .map(|t| FileTable {
-                table: t.name.clone(),
-                next_id: t.next_id,
-                rows: t.rows.iter().map(|r| r.values.iter().map(to_json).collect()).collect(),
-            })
-            .collect();
-        serde_json::to_string_pretty(&FileFormat { schema: self.schema.clone(), data }).unwrap()
-    }
-
-    /// Load a single-file archive (schema + data).
-    pub fn from_json(s: &str) -> Result<Store, DataError> {
-        let ff: FileFormat = serde_json::from_str(s)?;
-        ff.schema.validate()?;
-        Self::from_parts(ff.schema, ff.data)
-    }
-
-    /// Load data against a (possibly newer) schema, matching columns by position
-    /// in the stored rows; missing columns become Null, extra ones are dropped.
-    fn from_parts(schema: Schema, data: Vec<FileTable>) -> Result<Store, DataError> {
-        let mut store = Store::new(schema);
-        for ft in data {
-            let ti = store
-                .schema
-                .tables
+    /// Serialize to (schema file, data file).
+    pub fn save(&self) -> (String, String) {
+        let mut tables = serde_json::Map::new();
+        for (t, td) in self.schema.tables.iter().zip(&self.tables) {
+            let mut rows = td.rows.clone();
+            rows.sort_by_key(|r| r.id);
+            let rows: Vec<Json> = rows
                 .iter()
-                .position(|t| t.name == ft.table)
-                .ok_or_else(|| DataError::UnknownTable(ft.table.clone()))?;
+                .map(|r| {
+                    let mut m = serde_json::Map::new();
+                    for (f, v) in t.fields.iter().zip(&r.values) {
+                        if *v != Value::Null {
+                            m.insert(f.name.clone(), cell_to_json(v, f));
+                        }
+                    }
+                    if !r.orphans.is_empty() {
+                        m.insert("_orphans".into(), json!(r.orphans));
+                    }
+                    Json::Object(m)
+                })
+                .collect();
+            tables.insert(t.name.clone(), json!({"next_id": td.next_id, "rows": rows}));
+        }
+        for (k, v) in &self.orphan_tables {
+            tables.insert(k.clone(), v.clone());
+        }
+        let data = json!({"schema_version": self.schema.schema_version, "tables": tables});
+        (self.schema.to_json(), serde_json::to_string_pretty(&data).unwrap())
+    }
+
+    /// Load by field name. Returns the store and warnings (bad cells, orphans, old version).
+    pub fn load(schema_json: &str, data_json: &str) -> Result<(Store, Vec<String>), DataError> {
+        let schema = Schema::from_json(schema_json)?;
+        let data: Json = serde_json::from_str(data_json)?;
+        let mut warnings = vec![];
+        if let Some(v) = data["schema_version"].as_u64() {
+            if (v as u32) < schema.schema_version {
+                warnings.push(format!(
+                    "data has schema_version {v}, schema is {}; no migration defined",
+                    schema.schema_version
+                ));
+            }
+        }
+        let mut store = Store::new(schema);
+        let empty = serde_json::Map::new();
+        let tables = data["tables"].as_object().unwrap_or(&empty);
+        for (name, tj) in tables {
+            let Some(ti) = store.schema.tables.iter().position(|t| &t.name == name) else {
+                warnings.push(format!("table '{name}' not in schema, kept as orphan"));
+                store.orphan_tables.insert(name.clone(), tj.clone());
+                continue;
+            };
             let table = &store.schema.tables[ti];
-            let mut td = TableData::new(&ft.table);
-            td.next_id = ft.next_id.max(1);
-            for (n, row) in ft.rows.iter().enumerate() {
-                let values = table
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| from_json(row.get(i).unwrap_or(&Json::Null), f))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| DataError::Parse(format!("{} row {}: {e}", ft.table, n + 1)))?;
-                let id = match table.id_index().map(|i| &values[i]) {
-                    Some(Value::Int(i)) => *i as u64,
-                    _ => td.next_id + n as u64,
+            let mut td = TableData::new(name);
+            td.next_id = tj["next_id"].as_u64().unwrap_or(1).max(1);
+            let rows = tj["rows"].as_array().cloned().unwrap_or_default();
+            for (n, rj) in rows.iter().enumerate() {
+                let obj = rj.as_object().unwrap_or(&empty);
+                let mut orphans: BTreeMap<String, Json> = match obj.get("_orphans") {
+                    Some(Json::Object(m)) => m.clone().into_iter().collect(),
+                    _ => BTreeMap::new(),
+                };
+                let mut values = vec![];
+                for f in &table.fields {
+                    match obj.get(&f.name) {
+                        None => values.push(default_value(f)),
+                        Some(j) => match cell_from_json(j, f) {
+                            Ok(v) => values.push(v),
+                            Err(e) => {
+                                warnings.push(format!("{name} row {}: {e}", n + 1));
+                                orphans.insert(f.name.clone(), j.clone());
+                                values.push(Value::Null);
+                            }
+                        },
+                    }
+                }
+                for (k, j) in obj {
+                    if k != "_orphans" && table.field_index(k).is_none() {
+                        orphans.insert(k.clone(), j.clone());
+                    }
+                }
+                let id = match obj.get("id").and_then(|j| j.as_u64()) {
+                    Some(i) => i,
+                    None => td.next_id,
                 };
                 td.next_id = td.next_id.max(id + 1);
-                td.rows.push(Row { id, values });
+                if let Some(i) = table.id_index() {
+                    values[i] = Value::Int(id as i64);
+                }
+                let mut row = Row::new(id, values);
+                row.orphans = orphans;
+                td.rows.push(row);
             }
             store.tables[ti] = td;
         }
-        Ok(store)
+        let n: usize = store.tables.iter().flat_map(|t| &t.rows).filter(|r| !r.orphans.is_empty()).count();
+        if n > 0 {
+            warnings.push(format!("{n} rows carry orphaned values"));
+        }
+        Ok((store, warnings))
+    }
+
+    /// Drop all orphaned values and tables. Explicit user action only.
+    pub fn purge_orphans(&mut self) {
+        self.orphan_tables.clear();
+        for t in &mut self.tables {
+            for r in &mut t.rows {
+                r.orphans.clear();
+            }
+        }
     }
 }
 
@@ -366,27 +440,116 @@ mod tests {
     }
 
     #[test]
-    fn insert_assigns_ids_and_json_roundtrip() {
+    fn insert_and_roundtrip() {
         let s = schema();
         let mut store = Store::new(s.clone());
         let t = s.table("roll_film").unwrap();
         let mut v = TableData::blank_values(t);
         v[2] = Value::Text("HP5".into());
+        v[7] = Value::Time(90);
         let td = &mut store.tables[0];
         assert_eq!(td.insert(t, v.clone()), 1);
         assert_eq!(td.insert(t, v), 2);
-        assert_eq!(td.rows[1].values[0], Value::Int(2));
         td.remove(1);
-        let back = Store::from_json(&store.to_json()).unwrap();
+        let (sj, dj) = store.save();
+        assert!(dj.contains("\"01:30\""));
+        let (back, w) = Store::load(&sj, &dj).unwrap();
+        assert!(w.is_empty(), "{w:?}");
         assert_eq!(back.tables[0].next_id, 3);
         assert_eq!(back, store);
     }
 
+    fn small(fields: &str) -> String {
+        format!(r#"{{"name":"x","schema_version":2,"tables":[{{"name":"t","fields":[{fields}]}}]}}"#)
+    }
+    const A: &str = r#"{"name":"a","type":"text"}"#;
+    const B: &str = r#"{"name":"b","type":"int"}"#;
+    const DATA: &str = r#"{"schema_version":2,"tables":{"t":{"next_id":2,"rows":[{"a":"x","b":5}]}}}"#;
+
     #[test]
-    fn bad_cell_reports_row() {
+    fn reorder_fields_keeps_data() {
+        let (s, _) = Store::load(&small(&format!("{B},{A}")), DATA).unwrap();
+        assert_eq!(s.tables[0].rows[0].values, vec![Value::Int(5), Value::Text("x".into())]);
+    }
+
+    #[test]
+    fn added_field_gets_default() {
+        let c = r#"{"name":"c","type":"int","default":7}"#;
+        let (s, _) = Store::load(&small(&format!("{A},{B},{c}")), DATA).unwrap();
+        assert_eq!(s.tables[0].rows[0].values[2], Value::Int(7));
+    }
+
+    #[test]
+    fn removed_field_survives_as_orphan_until_purged() {
+        let (s, w) = Store::load(&small(A), DATA).unwrap();
+        assert!(w.iter().any(|m| m.contains("orphan")));
+        let (sj, dj) = s.save();
+        let (mut s2, _) = Store::load(&sj, &dj).unwrap();
+        assert_eq!(s2.tables[0].rows[0].orphans["b"], json!(5));
+        s2.purge_orphans();
+        assert!(!s2.save().1.contains("_orphans"));
+    }
+
+    #[test]
+    fn bad_cell_is_reported_not_fatal() {
+        let d = r#"{"tables":{"t":{"rows":[{"a":"x","b":"oops"}]}}}"#;
+        let (s, w) = Store::load(&small(&format!("{A},{B}")), d).unwrap();
+        assert!(w[0].contains("t row 1") && w[0].contains("b"), "{w:?}");
+        assert_eq!(s.tables[0].rows[0].orphans["b"], json!("oops"));
+    }
+
+    #[test]
+    fn bad_csv_cell_reports_row() {
         let s = schema();
         let t = s.table("roll_film").unwrap();
         let e = TableData::from_csv(t, "1,notadate,x\n").unwrap_err().to_string();
         assert!(e.contains("row 1") && e.contains("date"), "{e}");
+    }
+}
+
+/// Native file IO: atomic write (temp + rename), keeping one `.bak` of the previous file.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fs {
+    use super::*;
+    use std::path::Path;
+
+    fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, text)?;
+        if path.exists() {
+            let mut bak = path.as_os_str().to_owned();
+            bak.push(".bak");
+            std::fs::copy(path, bak)?;
+        }
+        std::fs::rename(tmp, path)
+    }
+
+    pub fn save(store: &Store, schema_path: &Path, data_path: &Path) -> std::io::Result<()> {
+        let (s, d) = store.save();
+        write_atomic(schema_path, &s)?;
+        write_atomic(data_path, &d)
+    }
+
+    pub fn load(schema_path: &Path, data_path: &Path) -> Result<(Store, Vec<String>), DataError> {
+        let io = |e: std::io::Error| DataError::Parse(e.to_string());
+        let s = std::fs::read_to_string(schema_path).map_err(io)?;
+        let d = std::fs::read_to_string(data_path).map_err(io)?;
+        Store::load(&s, &d)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fs_tests {
+    #[test]
+    fn save_load_with_backup() {
+        let dir = std::env::temp_dir().join("fa_fs_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (s, d) = (dir.join("a.schema.json"), dir.join("a.data.json"));
+        let schema = fa_schema::Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap();
+        let store = crate::Store::new(schema);
+        super::fs::save(&store, &s, &d).unwrap();
+        super::fs::save(&store, &s, &d).unwrap();
+        assert!(dir.join("a.data.json.bak").exists());
+        assert_eq!(super::fs::load(&s, &d).unwrap().0, store);
     }
 }

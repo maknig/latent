@@ -95,8 +95,8 @@ impl Table {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     pub name: String,
-    #[serde(default = "one")]
-    pub version: u32,
+    #[serde(default = "one", alias = "version")]
+    pub schema_version: u32,
     pub tables: Vec<Table>,
 }
 

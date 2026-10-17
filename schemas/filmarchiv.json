@@ -1,6 +1,6 @@
 {
   "name": "FilmArchiv",
-  "version": 1,
+  "schema_version": 1,
   "tables": [
     {
       "name": "roll_film", "label": "Rollfilme",
