@@ -1,0 +1,9 @@
+[package]
+name = "fa-import"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fa-schema = { path = "../../crates/schema" }
+fa-data = { path = "../../crates/data" }
+csv.workspace = true

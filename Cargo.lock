@@ -1202,6 +1202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fa-import"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "fa-data",
+ "fa-schema",
+]
+
+[[package]]
 name = "fa-schema"
 version = "0.1.0"
 dependencies = [
