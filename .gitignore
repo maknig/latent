@@ -1,3 +1,6 @@
 target
 dist
 result
+filmarchiv.schema.json
+filmarchiv.data.json
+*.bak

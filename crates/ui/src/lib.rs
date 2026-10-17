@@ -5,6 +5,22 @@ use fa_data::{default_value, format_value, parse_value, Store, TableData, Value}
 use fa_engine::{Engine, Query};
 use fa_schema::{Field, FieldType};
 
+enum Msg {
+    Csv(String),
+    Open(String, String),
+    Error(String),
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn(fut: impl std::future::Future<Output = ()> + 'static) {
+    wasm_bindgen_futures::spawn_local(fut);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn(fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    std::thread::spawn(move || pollster::block_on(fut));
+}
+
 type SaveHook = Box<dyn FnMut(&Store) -> Result<(), String>>;
 
 struct Form {
@@ -22,10 +38,15 @@ pub struct App {
     pub status: String,
     /// Native save hook: called with the store when the user saves.
     pub on_save: Option<SaveHook>,
+    /// Save to eframe storage (localStorage on web) for autosave.
+    pub persist: bool,
+    tx: std::sync::mpsc::Sender<Msg>,
+    rx: std::sync::mpsc::Receiver<Msg>,
 }
 
 impl App {
     pub fn new(store: Store) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         App {
             engine: Engine::new(store),
             table: 0,
@@ -34,6 +55,9 @@ impl App {
             form: None,
             status: String::new(),
             on_save: None,
+            persist: false,
+            tx,
+            rx,
         }
     }
 
@@ -87,6 +111,74 @@ impl App {
             None => self.selected = self.engine.insert(name, values),
         }
         self.form = None;
+    }
+
+    fn import_csv(&self, ctx: &egui::Context) {
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        spawn(async move {
+            if let Some(h) = rfd::AsyncFileDialog::new().add_filter("CSV", &["csv"]).pick_file().await {
+                let text = String::from_utf8_lossy(&h.read().await).into_owned();
+                let _ = tx.send(Msg::Csv(text));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn open_files(&self, ctx: &egui::Context) {
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        spawn(async move {
+            let Some(hs) = rfd::AsyncFileDialog::new().add_filter("JSON", &["json"]).pick_files().await else { return };
+            let (mut s, mut d) = (None, None);
+            for h in hs {
+                let text = String::from_utf8_lossy(&h.read().await).into_owned();
+                if h.file_name().contains("schema") { s = Some(text) } else { d = Some(text) }
+            }
+            let _ = tx.send(match (s, d) {
+                (Some(s), Some(d)) => Msg::Open(s, d),
+                _ => Msg::Error("select both the .schema.json and .data.json file".into()),
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn download(&self) {
+        let (s, d) = self.engine.store.save();
+        spawn(async move {
+            for (name, text) in [("filmarchiv.schema.json", s), ("filmarchiv.data.json", d)] {
+                if let Some(h) = rfd::AsyncFileDialog::new().set_file_name(name).save_file().await {
+                    let _ = h.write(text.as_bytes()).await;
+                }
+            }
+        });
+    }
+
+    fn poll(&mut self) {
+        while let Ok(m) = self.rx.try_recv() {
+            match m {
+                Msg::Csv(text) => {
+                    let schema = self.engine.store.schema.clone();
+                    let t = &schema.tables[self.table];
+                    match TableData::from_csv(t, &text) {
+                        Ok(td) => {
+                            let n = td.rows.len();
+                            for r in td.rows { self.engine.insert(&t.name, r.values); }
+                            self.status = format!("Imported {n} rows");
+                        }
+                        Err(e) => self.status = format!("Import failed: {e}"),
+                    }
+                }
+                Msg::Open(s, d) => match Store::load(&s, &d) {
+                    Ok((store, w)) => {
+                        self.engine = Engine::new(store);
+                        self.table = 0;
+                        self.selected = None;
+                        self.status = format!("Opened. {}", w.join("; "));
+                    }
+                    Err(e) => self.status = format!("Open failed: {e}"),
+                },
+                Msg::Error(e) => self.status = e,
+            }
+        }
     }
 
     fn save(&mut self) {
@@ -199,7 +291,16 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.persist {
+            let (s, d) = self.engine.store.save();
+            storage.set_string("schema", s);
+            storage.set_string("data", d);
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.poll();
         let (undo, redo, save) = ctx.input(|i| {
             (
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
@@ -216,6 +317,14 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() { self.save(); }
+                if ui.button("Open...").clicked() { self.open_files(ctx); }
+                if ui.button("Download").clicked() { self.download(); }
+                if ui.button("Import CSV").clicked() { self.import_csv(ctx); }
+                if ui.button("Purge orphans").clicked() {
+                    self.engine.store.purge_orphans();
+                    self.engine.dirty = true;
+                    self.status = "Orphans purged".into();
+                }
                 if ui.add_enabled(self.engine.can_undo(), egui::Button::new("Undo")).clicked() { self.engine.undo(); }
                 if ui.add_enabled(self.engine.can_redo(), egui::Button::new("Redo")).clicked() { self.engine.redo(); }
                 ui.separator();

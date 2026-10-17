@@ -7,4 +7,4 @@ edition = "2021"
 fa-ui = { path = "../../crates/ui" }
 fa-data = { path = "../../crates/data" }
 fa-schema = { path = "../../crates/schema" }
-eframe = "0.31"
+eframe = { version = "0.31", features = ["persistence"] }

@@ -7,5 +7,12 @@ edition = "2021"
 fa-schema = { path = "../schema" }
 fa-data = { path = "../data" }
 fa-engine = { path = "../engine" }
-eframe = "0.31"
+eframe = { version = "0.31", features = ["persistence"] }
 egui_extras = "0.31"
+rfd = "0.15"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
