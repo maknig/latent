@@ -64,6 +64,7 @@ pub struct App {
     /// Save to eframe storage (localStorage on web) for autosave.
     pub persist: bool,
     styled: bool,
+    show_filters: bool,
     /// Directory image paths are relative to (the data file's folder).
     pub base_dir: std::path::PathBuf,
     #[cfg(not(target_arch = "wasm32"))]
@@ -89,6 +90,7 @@ impl App {
             on_save: None,
             persist: false,
             styled: false,
+            show_filters: false,
             base_dir: ".".into(),
             #[cfg(not(target_arch = "wasm32"))]
             thumbs: Default::default(),
@@ -424,17 +426,22 @@ impl App {
         }
     }
 
-    fn filter_bar(&mut self, ui: &mut egui::Ui) {
+    fn clear_filters(&mut self) {
+        self.filters.iter_mut().for_each(|f| *f = Default::default());
+        self.query.search.clear();
+    }
+
+    fn filter_controls(&mut self, ui: &mut egui::Ui) {
         let t = self.engine.store.schema.tables[self.table].clone();
         self.filters.resize(t.fields.len(), Default::default());
-        ui.horizontal_wrapped(|ui| {
+        egui::Grid::new("filter_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             for (i, f) in t.fields.iter().enumerate() {
                 if !f.visible_in_table || f.ty == FieldType::Id {
                     continue;
                 }
                 let (a, b) = &mut self.filters[i];
-                ui.label(egui::RichText::new(f.label()).weak());
-                match f.ty {
+                ui.label(f.label());
+                ui.horizontal(|ui| match f.ty {
                     FieldType::Enum | FieldType::Bool => {
                         let opts: Vec<String> = if f.ty == FieldType::Bool { vec!["true".into(), "false".into()] } else { f.options.clone() };
                         egui::ComboBox::from_id_salt(("flt", i)).width(70.0).selected_text(a.as_str()).show_ui(ui, |ui| {
@@ -449,21 +456,21 @@ impl App {
                         ui.add(egui::TextEdit::singleline(b).hint_text("to").desired_width(60.0));
                     }
                     _ => {
-                        ui.add(egui::TextEdit::singleline(a).desired_width(80.0));
+                        ui.add(egui::TextEdit::singleline(a).desired_width(160.0));
                     }
-                }
-                ui.add_space(6.0);
+                });
+                ui.end_row();
             }
         });
-        ui.horizontal(|ui| {
-            if ui.button("Clear filters").clicked() {
-                self.filters.iter_mut().for_each(|f| *f = Default::default());
-                self.query.search.clear();
-            }
-            let total = self.engine.store.tables[self.table].rows.len();
-            let shown = self.engine.view(&t.name, &self.query).len();
-            ui.weak(format!("{shown} of {total} rows"));
-        });
+        ui.add_space(6.0);
+        if ui.button("Clear filters").clicked() {
+            self.clear_filters();
+        }
+    }
+
+    fn sync_filters(&mut self) {
+        let t = self.engine.store.schema.tables[self.table].clone();
+        self.filters.resize(t.fields.len(), Default::default());
         self.query.column_filters.clear();
         self.query.equals.clear();
         self.query.ranges.clear();
@@ -479,6 +486,7 @@ impl App {
     }
 
     fn table_view(&mut self, ui: &mut egui::Ui) {
+        ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
         let t = self.engine.store.schema.tables[self.table].clone();
         let ids = self.engine.view(&t.name, &self.query);
         let cols: Vec<usize> =
@@ -572,20 +580,33 @@ impl eframe::App for App {
         }
         if save { self.save(); }
 
+        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open...").clicked() { self.open_files(ctx); ui.close_menu(); }
+                    if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() { self.save(); ui.close_menu(); }
+                    if ui.button("Download").clicked() { self.download(); ui.close_menu(); }
+                    ui.separator();
+                    if ui.button("Import CSV...").clicked() { self.import_csv(ctx); ui.close_menu(); }
+                    if ui.button("Purge orphans").clicked() {
+                        self.engine.store.purge_orphans();
+                        self.engine.dirty = true;
+                        self.status = "Orphans purged".into();
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(self.engine.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() { self.engine.undo(); ui.close_menu(); }
+                    if ui.add_enabled(self.engine.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() { self.engine.redo(); ui.close_menu(); }
+                });
+                ui.menu_button("View", |ui| {
+                    if ui.button("Filter...").clicked() { self.show_filters = true; ui.close_menu(); }
+                    if ui.button("Clear filters").clicked() { self.clear_filters(); ui.close_menu(); }
+                });
+            });
+        });
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() { self.save(); }
-                if ui.button("Open...").clicked() { self.open_files(ctx); }
-                if ui.button("Download").clicked() { self.download(); }
-                if ui.button("Import CSV").clicked() { self.import_csv(ctx); }
-                if ui.button("Purge orphans").clicked() {
-                    self.engine.store.purge_orphans();
-                    self.engine.dirty = true;
-                    self.status = "Orphans purged".into();
-                }
-                if ui.add_enabled(self.engine.can_undo(), egui::Button::new("Undo")).clicked() { self.engine.undo(); }
-                if ui.add_enabled(self.engine.can_redo(), egui::Button::new("Redo")).clicked() { self.engine.redo(); }
-                ui.separator();
                 if ui.button("New").clicked() { self.open_form(None); }
                 if ui.add_enabled(self.selected.is_some(), egui::Button::new("Edit")).clicked() {
                     self.open_form(self.selected);
@@ -597,6 +618,13 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label("Search");
                 ui.text_edit_singleline(&mut self.query.search);
+                let active = self.filters.iter().any(|(a, b)| !a.is_empty() || !b.is_empty());
+                if ui.selectable_label(active, if active { "Filter... *" } else { "Filter..." }).clicked() {
+                    self.show_filters = true;
+                }
+                let total = self.engine.store.tables[self.table].rows.len();
+                let name = self.engine.store.schema.tables[self.table].name.clone();
+                ui.weak(format!("{} of {total} rows", self.engine.view(&name, &self.query).len()));
             });
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -606,10 +634,22 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             let mut pick = self.table;
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 18.0;
                 for (i, t) in self.engine.store.schema.tables.iter().enumerate() {
-                    ui.selectable_value(&mut pick, i, egui::RichText::new(t.label()).size(15.0));
+                    let active = i == self.table;
+                    let color = if active { egui::Color32::WHITE } else { egui::Color32::from_gray(140) };
+                    let resp = ui.add(egui::Label::new(egui::RichText::new(t.label()).size(15.0).color(color)).sense(egui::Sense::click()));
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if active {
+                        let r = resp.rect;
+                        ui.painter().line_segment([egui::pos2(r.left(), r.bottom() + 3.0), egui::pos2(r.right(), r.bottom() + 3.0)], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(70, 130, 200)));
+                    } else if resp.hovered() {
+                        ui.painter().line_segment([egui::pos2(resp.rect.left(), resp.rect.bottom() + 3.0), egui::pos2(resp.rect.right(), resp.rect.bottom() + 3.0)], egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)));
+                    }
+                    if resp.clicked() { pick = i; }
                 }
             });
+            ui.add_space(3.0);
             if pick != self.table {
                 self.table = pick;
                 self.query = Query::default();
@@ -620,7 +660,13 @@ impl eframe::App for App {
         });
         #[cfg(not(target_arch = "wasm32"))]
         self.image_strip(ctx);
-        egui::TopBottomPanel::top("filters").show(ctx, |ui| self.filter_bar(ui));
+        self.sync_filters();
+        if self.show_filters {
+            let mut open = true;
+            egui::Window::new("Filter").open(&mut open).show(ctx, |ui| self.filter_controls(ui));
+            self.show_filters = open;
+            self.sync_filters();
+        }
         egui::CentralPanel::default().show(ctx, |ui| self.table_view(ui));
         #[cfg(not(target_arch = "wasm32"))]
         self.preview_window(ctx);
