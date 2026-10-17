@@ -21,6 +21,8 @@ pub enum FieldType {
     Date,
     Time,
     Enum,
+    /// List of image file paths (relative to the data file).
+    Images,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

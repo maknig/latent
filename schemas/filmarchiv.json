@@ -14,7 +14,8 @@
         {"name": "developer", "type": "text", "label": "Entwickler"},
         {"name": "dev_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
         {"name": "dev_temp", "type": "float", "label": "Temperatur", "decimals": 1, "unit": "°C"},
-        {"name": "motiv", "type": "text", "label": "Motiv", "multiline": true}
+        {"name": "motiv", "type": "text", "label": "Motiv", "multiline": true},
+        {"name": "images", "type": "images", "label": "Bilder", "visible_in_table": false}
       ]
     },
     {
@@ -33,7 +34,8 @@
         {"name": "developer", "type": "text", "label": "Entwickler"},
         {"name": "dev_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
         {"name": "dev_temp", "type": "float", "label": "Temperatur", "decimals": 1, "unit": "°C"},
-        {"name": "motiv", "type": "text", "label": "Motiv", "multiline": true}
+        {"name": "motiv", "type": "text", "label": "Motiv", "multiline": true},
+        {"name": "images", "type": "images", "label": "Bilder", "visible_in_table": false}
       ]
     },
     {
@@ -48,7 +50,8 @@
         {"name": "paper", "type": "text", "label": "Papier"},
         {"name": "developer", "type": "text", "label": "Entwickler"},
         {"name": "develop_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
-        {"name": "notice", "type": "text", "label": "Notizen", "multiline": true}
+        {"name": "notice", "type": "text", "label": "Notizen", "multiline": true},
+        {"name": "images", "type": "images", "label": "Bilder", "visible_in_table": false}
       ]
     }
   ]

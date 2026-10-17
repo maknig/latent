@@ -1198,6 +1198,7 @@ dependencies = [
  "fa-data",
  "fa-engine",
  "fa-schema",
+ "image",
  "pollster",
  "rfd",
  "wasm-bindgen-futures",
@@ -1759,6 +1760,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

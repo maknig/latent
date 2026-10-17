@@ -23,6 +23,7 @@ fn main() -> eframe::Result {
     };
 
     let mut app = fa_ui::App::new(store);
+    app.base_dir = data_path.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into());
     app.on_save = Some(Box::new(move |s| {
         fa_data::fs::save(s, &schema_path, &data_path).map_err(|e| e.to_string())
     }));

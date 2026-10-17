@@ -52,6 +52,14 @@ impl Value {
     }
 }
 
+/// Paths held by an `images` cell.
+pub fn image_paths(v: &Value) -> Vec<String> {
+    match v {
+        Value::Text(s) => s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
+        _ => vec![],
+    }
+}
+
 pub fn format_time(secs: u32, fmt: &str) -> String {
     if fmt == "%H:%M" {
         format!("{:02}:{:02}", secs / 3600, (secs / 60) % 60)
@@ -100,7 +108,7 @@ pub fn parse_value(s: &str, f: &Field) -> Result<Value, DataError> {
             NaiveDate::parse_from_str(s, f.date_format()).map_err(|_| err("date"))?,
         ),
         FieldType::Time => Value::Time(parse_time(s, f.time_format()).ok_or_else(|| err("time"))?),
-        FieldType::Text | FieldType::Enum => Value::Text(s.to_string()),
+        FieldType::Text | FieldType::Enum | FieldType::Images => Value::Text(s.to_string()),
     })
 }
 
@@ -258,12 +266,16 @@ pub struct Store {
 fn cell_to_json(v: &Value, f: &Field) -> Json {
     match v {
         Value::Time(t) => json!(format_time(*t, f.time_format())),
+        Value::Text(s) if f.ty == FieldType::Images => json!(image_paths(&Value::Text(s.clone()))),
         other => to_json(other),
     }
 }
 
 fn cell_from_json(j: &Json, f: &Field) -> Result<Value, DataError> {
     match (j, f.ty) {
+        (Json::Array(a), FieldType::Images) => Ok(Value::Text(
+            a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"),
+        )),
         (Json::String(s), FieldType::Time) => parse_time(s, f.time_format())
             .map(Value::Time)
             .ok_or_else(|| DataError::Parse(format!("field '{}': invalid time '{s}'", f.name))),
@@ -292,6 +304,9 @@ impl Store {
                 .iter()
                 .map(|r| {
                     let mut m = serde_json::Map::new();
+                    if t.id_index().is_none() {
+                        m.insert("_id".into(), json!(r.id));
+                    }
                     for (f, v) in t.fields.iter().zip(&r.values) {
                         if *v != Value::Null {
                             m.insert(f.name.clone(), cell_to_json(v, f));
@@ -359,11 +374,11 @@ impl Store {
                     }
                 }
                 for (k, j) in obj {
-                    if k != "_orphans" && table.field_index(k).is_none() {
+                    if k != "_orphans" && k != "_id" && table.field_index(k).is_none() {
                         orphans.insert(k.clone(), j.clone());
                     }
                 }
-                let id = match obj.get("id").and_then(|j| j.as_u64()) {
+                let id = match obj.get(if table.id_index().is_some() { "id" } else { "_id" }).and_then(|j| j.as_u64()) {
                     Some(i) => i,
                     None => td.next_id,
                 };
@@ -401,6 +416,18 @@ mod tests {
 
     fn schema() -> Schema {
         Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap()
+    }
+
+    #[test]
+    fn images_roundtrip() {
+        let sj = r#"{"name":"x","tables":[{"name":"t","fields":[{"name":"p","type":"images"}]}]}"#;
+        let dj = r#"{"tables":{"t":{"next_id":2,"rows":[{"p":["a/1.jpg","b.png"]}]}}}"#;
+        let (s, w) = Store::load(sj, dj).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(image_paths(&s.tables[0].rows[0].values[0]), vec!["a/1.jpg", "b.png"]);
+        let (_, d2) = s.save();
+        assert!(d2.contains("\"b.png\""));
+        assert_eq!(Store::load(sj, &d2).unwrap().0, s);
     }
 
     #[test]

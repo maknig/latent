@@ -5,10 +5,15 @@ use fa_data::{default_value, format_value, parse_value, Store, TableData, Value}
 use fa_engine::{Engine, Query};
 use fa_schema::{Field, FieldType};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod images;
+
 enum Msg {
     Csv(String),
     Open(String, String),
     Error(String),
+    #[cfg(not(target_arch = "wasm32"))]
+    AddImages(Vec<std::path::PathBuf>),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -59,6 +64,12 @@ pub struct App {
     /// Save to eframe storage (localStorage on web) for autosave.
     pub persist: bool,
     styled: bool,
+    /// Directory image paths are relative to (the data file's folder).
+    pub base_dir: std::path::PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
+    thumbs: images::Thumbs,
+    #[cfg(not(target_arch = "wasm32"))]
+    preview: Option<std::path::PathBuf>,
     /// Per-column filter inputs (a, b); b is the range end.
     filters: Vec<(String, String)>,
     tx: std::sync::mpsc::Sender<Msg>,
@@ -78,6 +89,11 @@ impl App {
             on_save: None,
             persist: false,
             styled: false,
+            base_dir: ".".into(),
+            #[cfg(not(target_arch = "wasm32"))]
+            thumbs: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            preview: None,
             filters: vec![],
             tx,
             rx,
@@ -200,6 +216,8 @@ impl App {
                     Err(e) => self.status = format!("Open failed: {e}"),
                 },
                 Msg::Error(e) => self.status = e,
+                #[cfg(not(target_arch = "wasm32"))]
+                Msg::AddImages(p) => self.add_images(p),
             }
         }
     }
@@ -221,6 +239,9 @@ impl App {
         match f.ty {
             FieldType::Id => {
                 ui.label(text.as_str());
+            }
+            FieldType::Images => {
+                ui.weak(format!("{} image(s), managed in the strip below the table", text.lines().filter(|l| !l.trim().is_empty()).count()));
             }
             FieldType::Enum => {
                 egui::ComboBox::from_id_salt(&f.name)
@@ -252,6 +273,154 @@ impl App {
                     ui.label(u);
                 }
             }
+        }
+    }
+
+    /// Index of the table's first `images` field.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn image_field(&self) -> Option<usize> {
+        self.engine.store.schema.tables[self.table].fields.iter().position(|f| f.ty == FieldType::Images)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn selected_paths(&self) -> Vec<String> {
+        let (Some(fi), Some(id)) = (self.image_field(), self.selected) else { return vec![] };
+        self.engine.store.tables[self.table]
+            .rows
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| fa_data::image_paths(&r.values[fi]))
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_selected_paths(&mut self, paths: Vec<String>) {
+        let (Some(fi), Some(id)) = (self.image_field(), self.selected) else { return };
+        let name = self.engine.store.schema.tables[self.table].name.clone();
+        let Some(row) = self.engine.store.tables[self.table].rows.iter().find(|r| r.id == id) else { return };
+        let mut values = row.values.clone();
+        values[fi] = if paths.is_empty() { Value::Null } else { Value::Text(paths.join("\n")) };
+        self.engine.update(&name, id, values);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn add_images(&mut self, files: Vec<std::path::PathBuf>) {
+        if self.image_field().is_none() || self.selected.is_none() {
+            self.status = "Select a row first to add images".into();
+            return;
+        }
+        let mut paths = self.selected_paths();
+        for f in files {
+            let p = f.strip_prefix(&self.base_dir).unwrap_or(&f).to_string_lossy().into_owned();
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        self.set_selected_paths(paths);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve(&self, p: &str) -> std::path::PathBuf {
+        let p = std::path::Path::new(p);
+        if p.is_absolute() { p.to_path_buf() } else { self.base_dir.join(p) }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn image_strip(&mut self, ctx: &egui::Context) {
+        if self.image_field().is_none() {
+            return;
+        }
+        let paths = self.selected_paths();
+        let mut remove = None;
+        let mut add = false;
+        egui::TopBottomPanel::bottom("images").resizable(true).default_height(150.0).min_height(60.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Images").strong());
+                if ui.add_enabled(self.selected.is_some(), egui::Button::new("Add images...")).clicked() {
+                    add = true;
+                }
+                if self.selected.is_none() {
+                    ui.weak("select a row to see its images (or drop files here)");
+                }
+            });
+            let size = (ui.available_height() - 12.0).clamp(48.0, 400.0);
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (n, p) in paths.iter().enumerate() {
+                        let full = self.resolve(p);
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(size * 1.3, size), egui::Sense::click());
+                        match self.thumbs.get(ctx, &full, 320) {
+                            images::Thumb::Ready(tex) => {
+                                let s = tex.size_vec2();
+                                let scale = (rect.width() / s.x).min(rect.height() / s.y);
+                                let r = egui::Rect::from_center_size(rect.center(), s * scale);
+                                ui.painter().image(tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                            }
+                            images::Thumb::Loading => {
+                                ui.put(rect, egui::Spinner::new());
+                            }
+                            images::Thumb::Missing => {
+                                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(45));
+                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "missing", egui::FontId::proportional(12.0), egui::Color32::GRAY);
+                            }
+                        }
+                        if resp.double_clicked() {
+                            self.preview = Some(full);
+                        }
+                        resp.on_hover_text(p).context_menu(|ui| {
+                            if ui.button("Open large").clicked() {
+                                self.preview = Some(self.resolve(p));
+                                ui.close_menu();
+                            }
+                            if ui.button("Remove").clicked() {
+                                remove = Some(n);
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        if let Some(n) = remove {
+            let mut p = paths;
+            p.remove(n);
+            self.set_selected_paths(p);
+        }
+        if add {
+            let (tx, ctx) = (self.tx.clone(), ctx.clone());
+            spawn(async move {
+                let files = rfd::AsyncFileDialog::new()
+                    .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff"])
+                    .pick_files()
+                    .await;
+                if let Some(fs) = files {
+                    let _ = tx.send(Msg::AddImages(fs.iter().map(|h| h.path().to_path_buf()).collect()));
+                    ctx.request_repaint();
+                }
+            });
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn preview_window(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.preview.clone() else { return };
+        let mut open = true;
+        egui::Window::new(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+            .open(&mut open)
+            .default_size([700.0, 500.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                let avail = ui.available_size();
+                if let images::Thumb::Ready(tex) = self.thumbs.get(ctx, &path, 2048) {
+                    let s = tex.size_vec2();
+                    let scale = (avail.x / s.x).min(avail.y / s.y);
+                    ui.centered_and_justified(|ui| ui.image((tex.id(), s * scale)));
+                } else {
+                    ui.spinner();
+                }
+            });
+        if !open {
+            self.preview = None;
         }
     }
 
@@ -382,6 +551,14 @@ impl eframe::App for App {
             self.styled = true;
         }
         self.poll();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.thumbs.poll(ctx);
+            let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|d| d.path.clone()).collect());
+            if !dropped.is_empty() {
+                self.add_images(dropped);
+            }
+        }
         let (undo, redo, save) = ctx.input(|i| {
             (
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
@@ -441,8 +618,12 @@ impl eframe::App for App {
                 self.form = None;
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.image_strip(ctx);
         egui::TopBottomPanel::top("filters").show(ctx, |ui| self.filter_bar(ui));
         egui::CentralPanel::default().show(ctx, |ui| self.table_view(ui));
+        #[cfg(not(target_arch = "wasm32"))]
+        self.preview_window(ctx);
 
         let mut commit = false;
         let mut cancel = false;
