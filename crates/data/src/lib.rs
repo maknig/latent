@@ -551,6 +551,70 @@ pub mod fs {
         std::fs::rename(tmp, path)
     }
 
+    fn same_file(a: &Path, b: &Path) -> bool {
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) if x.len() == y.len() => {
+                matches!((std::fs::read(a), std::fs::read(b)), (Ok(p), Ok(q)) if p == q)
+            }
+            _ => false,
+        }
+    }
+
+    /// Copy `source` into `<archive>/images/<table>/<row id>/` and return the archive-relative
+    /// path (forward slashes). Identical existing files are reused; name clashes get a suffix.
+    pub fn import_image(archive: &Path, table: &str, row_id: u64, source: &Path) -> std::io::Result<String> {
+        let name = source.file_name().ok_or_else(|| std::io::Error::other("no file name"))?;
+        let rel_dir = format!("images/{table}/{row_id:04}");
+        let dir = archive.join(&rel_dir);
+        std::fs::create_dir_all(&dir)?;
+        let (stem, ext) = (
+            source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            source.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default(),
+        );
+        let mut n = 0;
+        loop {
+            let fname = if n == 0 { name.to_string_lossy().into_owned() } else { format!("{stem}-{n}{ext}") };
+            let target = dir.join(&fname);
+            if !target.exists() {
+                std::fs::copy(source, &target)?;
+                return Ok(format!("{rel_dir}/{fname}"));
+            }
+            if same_file(source, &target) {
+                return Ok(format!("{rel_dir}/{fname}"));
+            }
+            n += 1;
+        }
+    }
+
+    /// Files under `<archive>/images` that no row references.
+    pub fn unused_images(store: &Store, archive: &Path) -> Vec<std::path::PathBuf> {
+        let mut used = std::collections::HashSet::new();
+        for (t, td) in store.schema.tables.iter().zip(&store.tables) {
+            for (i, f) in t.fields.iter().enumerate() {
+                if f.ty == FieldType::Images {
+                    for r in &td.rows {
+                        used.extend(image_paths(&r.values[i]).into_iter().map(|p| archive.join(p)));
+                    }
+                }
+            }
+        }
+        let mut out = vec![];
+        let mut stack = vec![archive.join("images")];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if !used.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     pub fn save(store: &Store, schema_path: &Path, data_path: &Path) -> std::io::Result<()> {
         let (s, d) = store.save();
         write_atomic(schema_path, &s)?;
@@ -578,5 +642,35 @@ mod fs_tests {
         super::fs::save(&store, &s, &d).unwrap();
         assert!(dir.join("a.data.json.bak").exists());
         assert_eq!(super::fs::load(&s, &d).unwrap().0, store);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn import_and_unused() {
+        let root = std::env::temp_dir().join("fa_img_test");
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, arch) = (root.join("src"), root.join("arch"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.jpg"), b"one").unwrap();
+        let r1 = fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap();
+        assert_eq!(r1, "images/roll_film/0001/a.jpg");
+        // identical file is reused
+        assert_eq!(fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap(), r1);
+        // different content with the same name gets a suffix
+        std::fs::write(src.join("a.jpg"), b"two").unwrap();
+        let r2 = fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap();
+        assert_eq!(r2, "images/roll_film/0001/a-1.jpg");
+        assert!(fs::import_image(&arch, "roll_film", 1, &src.join("missing.jpg")).is_err());
+
+        let sj = r#"{"name":"x","tables":[{"name":"roll_film","fields":[{"name":"p","type":"images"}]}]}"#;
+        let mut store = Store::new(Schema::from_json(sj).unwrap());
+        let t = store.schema.tables[0].clone();
+        store.tables[0].insert(&t, vec![Value::Text(r1)]);
+        let unused = fs::unused_images(&store, &arch);
+        assert_eq!(unused, vec![arch.join(&r2)]);
     }
 }

@@ -14,6 +14,9 @@ enum Msg {
     Error(String),
     #[cfg(not(target_arch = "wasm32"))]
     AddImages(Vec<std::path::PathBuf>),
+    /// Copied images: (table index, row id, archive-relative paths, errors).
+    #[cfg(not(target_arch = "wasm32"))]
+    Copied(usize, u64, Vec<String>, Vec<String>),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -65,6 +68,9 @@ pub struct App {
     pub persist: bool,
     styled: bool,
     show_filters: bool,
+    /// Pending "delete unused images" confirmation.
+    #[cfg(not(target_arch = "wasm32"))]
+    unused: Option<Vec<std::path::PathBuf>>,
     /// Directory image paths are relative to (the data file's folder).
     pub base_dir: std::path::PathBuf,
     #[cfg(not(target_arch = "wasm32"))]
@@ -91,6 +97,8 @@ impl App {
             persist: false,
             styled: false,
             show_filters: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            unused: None,
             base_dir: ".".into(),
             #[cfg(not(target_arch = "wasm32"))]
             thumbs: Default::default(),
@@ -220,6 +228,8 @@ impl App {
                 Msg::Error(e) => self.status = e,
                 #[cfg(not(target_arch = "wasm32"))]
                 Msg::AddImages(p) => self.add_images(p),
+                #[cfg(not(target_arch = "wasm32"))]
+                Msg::Copied(table, id, new, errs) => self.finish_copy(table, id, new, errs),
             }
         }
     }
@@ -307,18 +317,39 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn add_images(&mut self, files: Vec<std::path::PathBuf>) {
-        if self.image_field().is_none() || self.selected.is_none() {
+        let (Some(id), true) = (self.selected, self.image_field().is_some()) else {
             self.status = "Select a row first to add images".into();
             return;
-        }
-        let mut paths = self.selected_paths();
-        for f in files {
-            let p = f.strip_prefix(&self.base_dir).unwrap_or(&f).to_string_lossy().into_owned();
-            if !paths.contains(&p) {
-                paths.push(p);
+        };
+        let table = self.table;
+        let name = self.engine.store.schema.tables[table].name.clone();
+        let (dir, tx) = (self.base_dir.clone(), self.tx.clone());
+        self.status = format!("Copying {} file(s)...", files.len());
+        std::thread::spawn(move || {
+            let (mut ok, mut errs) = (vec![], vec![]);
+            for f in files {
+                match fa_data::fs::import_image(&dir, &name, id, &f) {
+                    Ok(p) => ok.push(p),
+                    Err(e) => errs.push(format!("{}: {e}", f.display())),
+                }
             }
+            let _ = tx.send(Msg::Copied(table, id, ok, errs));
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_copy(&mut self, table: usize, id: u64, new: Vec<String>, errs: Vec<String>) {
+        let n = new.len();
+        if table == self.table && self.selected == Some(id) {
+            let mut paths = self.selected_paths();
+            for p in new {
+                if !paths.contains(&p) {
+                    paths.push(p);
+                }
+            }
+            self.set_selected_paths(paths);
         }
-        self.set_selected_paths(paths);
+        self.status = if errs.is_empty() { format!("Copied {n} file(s)") } else { format!("Copied {n}, failed: {}", errs.join("; ")) };
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -400,6 +431,40 @@ impl App {
                     ctx.request_repaint();
                 }
             });
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn unused_dialog(&mut self, ctx: &egui::Context) {
+        let Some(files) = self.unused.clone() else { return };
+        let (mut delete, mut cancel) = (false, false);
+        egui::Window::new("Delete unused images").collapsible(false).show(ctx, |ui| {
+            if files.is_empty() {
+                ui.label("No unused images.");
+            } else {
+                ui.label(format!("{} file(s) are not used by any row:", files.len()));
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for f in &files {
+                        ui.label(f.strip_prefix(&self.base_dir).unwrap_or(f).to_string_lossy());
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                if !files.is_empty() {
+                    delete = ui.button("Delete").clicked();
+                }
+                cancel = ui.button(if files.is_empty() { "OK" } else { "Cancel" }).clicked();
+            });
+        });
+        if delete {
+            // Re-check: only delete what is still unused now.
+            let still: std::collections::HashSet<_> = fa_data::fs::unused_images(&self.engine.store, &self.base_dir).into_iter().collect();
+            let files: Vec<_> = files.into_iter().filter(|f| still.contains(f)).collect();
+            let failed = files.iter().filter(|f| std::fs::remove_file(f).is_err()).count();
+            self.status = format!("Deleted {} file(s), {failed} failed", files.len() - failed);
+        }
+        if delete || cancel {
+            self.unused = None;
         }
     }
 
@@ -588,6 +653,17 @@ impl eframe::App for App {
                     if ui.button("Download").clicked() { self.download(); ui.close_menu(); }
                     ui.separator();
                     if ui.button("Import CSV...").clicked() { self.import_csv(ctx); ui.close_menu(); }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui.button("Open archive folder").clicked() {
+                            let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" }).arg(&self.base_dir).spawn();
+                            ui.close_menu();
+                        }
+                        if ui.button("Delete unused images...").clicked() {
+                            self.unused = Some(fa_data::fs::unused_images(&self.engine.store, &self.base_dir));
+                            ui.close_menu();
+                        }
+                    }
                     if ui.button("Purge orphans").clicked() {
                         self.engine.store.purge_orphans();
                         self.engine.dirty = true;
@@ -670,6 +746,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| self.table_view(ui));
         #[cfg(not(target_arch = "wasm32"))]
         self.preview_window(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.unused_dialog(ctx);
 
         let mut commit = false;
         let mut cancel = false;
