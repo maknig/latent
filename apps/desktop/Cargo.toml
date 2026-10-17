@@ -1,0 +1,10 @@
+[package]
+name = "filmarchiv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fa-ui = { path = "../../crates/ui" }
+fa-data = { path = "../../crates/data" }
+fa-schema = { path = "../../crates/schema" }
+eframe = "0.31"
