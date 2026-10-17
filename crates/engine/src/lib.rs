@@ -16,6 +16,10 @@ pub struct Query {
     pub search: String,
     /// Per-column substring filters (field index, text).
     pub column_filters: Vec<(usize, String)>,
+    /// Exact match on the displayed value (enum columns).
+    pub equals: Vec<(usize, String)>,
+    /// Inclusive range as typed text (from, to), parsed per field type (numbers, dates, times).
+    pub ranges: Vec<(usize, String, String)>,
 }
 
 pub struct Engine {
@@ -131,6 +135,8 @@ impl Engine {
                     && q.column_filters
                         .iter()
                         .all(|(i, s)| *i >= t.fields.len() || cell(r, *i).contains(&s.to_lowercase()))
+                    && q.equals.iter().all(|(i, s)| *i >= t.fields.len() || s.is_empty() || cell(r, *i) == s.to_lowercase())
+                    && q.ranges.iter().all(|(i, lo, hi)| *i >= t.fields.len() || in_range(&r.values[*i], &t.fields[*i], lo, hi))
             })
             .collect();
         if let Some((i, asc)) = q.sort.filter(|(i, _)| *i < t.fields.len()) {
@@ -141,6 +147,17 @@ impl Engine {
         }
         rows.iter().map(|r| r.id).collect()
     }
+}
+
+fn in_range(v: &Value, f: &fa_schema::Field, lo: &str, hi: &str) -> bool {
+    let (lo, hi) = (fa_data::parse_value(lo, f).unwrap_or(Value::Null), fa_data::parse_value(hi, f).unwrap_or(Value::Null));
+    if lo == Value::Null && hi == Value::Null {
+        return true;
+    }
+    if *v == Value::Null {
+        return false;
+    }
+    (lo == Value::Null || v.cmp_value(&lo).is_ge()) && (hi == Value::Null || v.cmp_value(&hi).is_le())
 }
 
 #[cfg(test)]
@@ -186,6 +203,25 @@ mod tests {
         e.undo();
         e.insert("roll_film", vals(&e, "X", 50));
         assert!(!e.can_redo());
+    }
+
+    #[test]
+    fn typed_filters() {
+        let mut e = engine();
+        for (n, i) in [("HP5", 400), ("acros", 100), ("Tri-X", 800)] {
+            e.insert("roll_film", vals(&e, n, i));
+        }
+        let q = Query { ranges: vec![(5, "200".into(), "".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q), vec![1, 3]);
+        let q = Query { ranges: vec![(5, "".into(), "400".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q), vec![1, 2]);
+        let q = Query { equals: vec![(2, "acros".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q), vec![2]);
+        // rows default to today's date
+        let q = Query { ranges: vec![(1, "01.01.2000".into(), "".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q).len(), 3);
+        let q = Query { ranges: vec![(1, "01.01.2999".into(), "".into())], ..Default::default() };
+        assert!(e.view("roll_film", &q).is_empty());
     }
 
     #[test]

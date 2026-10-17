@@ -21,6 +21,24 @@ fn spawn(fut: impl std::future::Future<Output = ()> + Send + 'static) {
     std::thread::spawn(move || pollster::block_on(fut));
 }
 
+fn apply_theme(ctx: &egui::Context) {
+    let accent = egui::Color32::from_rgb(70, 130, 200);
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = egui::Color32::from_gray(30);
+    v.window_fill = egui::Color32::from_gray(36);
+    v.extreme_bg_color = egui::Color32::from_gray(22);
+    v.faint_bg_color = egui::Color32::from_gray(36);
+    v.selection.bg_fill = accent;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(48));
+    v.widgets.hovered.bg_fill = egui::Color32::from_gray(55);
+    v.striped = true;
+    ctx.set_visuals(v);
+    ctx.style_mut(|s| {
+        s.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+    });
+}
+
 type SaveHook = Box<dyn FnMut(&Store) -> Result<(), String>>;
 
 struct Form {
@@ -40,6 +58,9 @@ pub struct App {
     pub on_save: Option<SaveHook>,
     /// Save to eframe storage (localStorage on web) for autosave.
     pub persist: bool,
+    styled: bool,
+    /// Per-column filter inputs (a, b); b is the range end.
+    filters: Vec<(String, String)>,
     tx: std::sync::mpsc::Sender<Msg>,
     rx: std::sync::mpsc::Receiver<Msg>,
 }
@@ -56,6 +77,8 @@ impl App {
             status: String::new(),
             on_save: None,
             persist: false,
+            styled: false,
+            filters: vec![],
             tx,
             rx,
         }
@@ -232,6 +255,60 @@ impl App {
         }
     }
 
+    fn filter_bar(&mut self, ui: &mut egui::Ui) {
+        let t = self.engine.store.schema.tables[self.table].clone();
+        self.filters.resize(t.fields.len(), Default::default());
+        ui.horizontal_wrapped(|ui| {
+            for (i, f) in t.fields.iter().enumerate() {
+                if !f.visible_in_table || f.ty == FieldType::Id {
+                    continue;
+                }
+                let (a, b) = &mut self.filters[i];
+                ui.label(egui::RichText::new(f.label()).weak());
+                match f.ty {
+                    FieldType::Enum | FieldType::Bool => {
+                        let opts: Vec<String> = if f.ty == FieldType::Bool { vec!["true".into(), "false".into()] } else { f.options.clone() };
+                        egui::ComboBox::from_id_salt(("flt", i)).width(70.0).selected_text(a.as_str()).show_ui(ui, |ui| {
+                            ui.selectable_value(a, String::new(), "(all)");
+                            for o in opts {
+                                ui.selectable_value(a, o.clone(), o);
+                            }
+                        });
+                    }
+                    FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => {
+                        ui.add(egui::TextEdit::singleline(a).hint_text("from").desired_width(60.0));
+                        ui.add(egui::TextEdit::singleline(b).hint_text("to").desired_width(60.0));
+                    }
+                    _ => {
+                        ui.add(egui::TextEdit::singleline(a).desired_width(80.0));
+                    }
+                }
+                ui.add_space(6.0);
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Clear filters").clicked() {
+                self.filters.iter_mut().for_each(|f| *f = Default::default());
+                self.query.search.clear();
+            }
+            let total = self.engine.store.tables[self.table].rows.len();
+            let shown = self.engine.view(&t.name, &self.query).len();
+            ui.weak(format!("{shown} of {total} rows"));
+        });
+        self.query.column_filters.clear();
+        self.query.equals.clear();
+        self.query.ranges.clear();
+        for (i, f) in t.fields.iter().enumerate() {
+            let (a, b) = self.filters[i].clone();
+            match f.ty {
+                FieldType::Enum | FieldType::Bool => self.query.equals.push((i, a)),
+                FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => self.query.ranges.push((i, a, b)),
+                _ if !a.is_empty() => self.query.column_filters.push((i, a)),
+                _ => {}
+            }
+        }
+    }
+
     fn table_view(&mut self, ui: &mut egui::Ui) {
         let t = self.engine.store.schema.tables[self.table].clone();
         let ids = self.engine.view(&t.name, &self.query);
@@ -254,7 +331,7 @@ impl App {
                             Some((c, false)) if c == i => " v",
                             _ => "",
                         };
-                        if ui.button(format!("{}{arrow}", t.fields[i].label())).clicked() {
+                        if ui.add(egui::Label::new(egui::RichText::new(format!("{}{arrow}", t.fields[i].label())).strong()).sense(egui::Sense::click())).clicked() {
                             self.query.sort = match self.query.sort {
                                 Some((c, true)) if c == i => Some((i, false)),
                                 Some((c, false)) if c == i => None,
@@ -300,6 +377,10 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if !self.styled {
+            apply_theme(ctx);
+            self.styled = true;
+        }
         self.poll();
         let (undo, redo, save) = ctx.input(|i| {
             (
@@ -345,18 +426,22 @@ impl eframe::App for App {
             let n = self.engine.store.tables[self.table].rows.len();
             ui.label(format!("{n} rows{}  {}", if self.engine.dirty { "  (unsaved)" } else { "" }, self.status));
         });
-        egui::SidePanel::left("tables").show(ctx, |ui| {
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             let mut pick = self.table;
-            for (i, t) in self.engine.store.schema.tables.iter().enumerate() {
-                ui.selectable_value(&mut pick, i, t.label());
-            }
+            ui.horizontal(|ui| {
+                for (i, t) in self.engine.store.schema.tables.iter().enumerate() {
+                    ui.selectable_value(&mut pick, i, egui::RichText::new(t.label()).size(15.0));
+                }
+            });
             if pick != self.table {
                 self.table = pick;
                 self.query = Query::default();
+                self.filters.clear();
                 self.selected = None;
                 self.form = None;
             }
         });
+        egui::TopBottomPanel::top("filters").show(ctx, |ui| self.filter_bar(ui));
         egui::CentralPanel::default().show(ctx, |ui| self.table_view(ui));
 
         let mut commit = false;
