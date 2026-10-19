@@ -225,6 +225,20 @@ mod tests {
     }
 
     #[test]
+    fn id_range() {
+        let mut e = engine();
+        for n in ["a", "b", "c", "d"] {
+            e.insert("roll_film", vals(&e, n, 400));
+        }
+        let q = Query { ranges: vec![(0, "2".into(), "3".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q), vec![2, 3]);
+        let q = Query { ranges: vec![(0, "".into(), "2".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q), vec![1, 2]);
+        let q = Query { ranges: vec![(0, "3".into(), "".into())], ..Default::default() };
+        assert_eq!(e.view("roll_film", &q), vec![3, 4]);
+    }
+
+    #[test]
     fn sort_and_filter() {
         let mut e = engine();
         for (n, i) in [("HP5", 400), ("acros", 100), ("Tri-X", 400)] {

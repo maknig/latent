@@ -55,9 +55,52 @@ impl Value {
 /// Paths held by an `images` cell.
 pub fn image_paths(v: &Value) -> Vec<String> {
     match v {
-        Value::Text(s) => s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
+        Value::Text(s) => s
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
         _ => vec![],
     }
+}
+
+/// Warning text returned by `Store::load` when an old schema got image links added.
+pub const UPGRADE_WARNING: &str = "schema upgraded: image links and image info added (save to keep)";
+
+/// Film table name and row id encoded in an image path `images/<table>/<id:04>/<file>`.
+pub fn film_row_for(path: &str) -> Option<(String, u64)> {
+    let mut parts = path.split('/');
+    if parts.next()? != "images" {
+        return None;
+    }
+    let table = parts.next()?.to_string();
+    let id = parts.next()?.parse().ok()?;
+    parts.next()?;
+    Some((table, id))
+}
+
+/// Ids of the enlargement rows whose `image_ref` is `path`.
+pub fn enlargements_for(store: &Store, path: &str) -> Vec<u64> {
+    let Some(ti) = store.schema.role_index(fa_schema::TableRole::Enlargement) else {
+        return vec![];
+    };
+    let Some(fi) = store.schema.tables[ti].image_ref_index() else {
+        return vec![];
+    };
+    store.tables[ti]
+        .rows
+        .iter()
+        .filter(|r| matches!(&r.values[fi], Value::Text(s) if s.trim() == path))
+        .map(|r| r.id)
+        .collect()
+}
+
+/// Id of the `image_info` row whose `image_ref` is `path`.
+pub fn image_info_for(store: &Store, path: &str) -> Option<u64> {
+    let ti = store.schema.role_index(fa_schema::TableRole::ImageInfo)?;
+    let fi = store.schema.tables[ti].image_ref_index()?;
+    store.tables[ti].rows.iter().find(|r| matches!(&r.values[fi], Value::Text(s) if s.trim() == path)).map(|r| r.id)
 }
 
 pub fn format_time(secs: u32, fmt: &str) -> String {
@@ -74,7 +117,11 @@ pub fn parse_time(s: &str, fmt: &str) -> Option<u32> {
     if b >= 60 {
         return None;
     }
-    Some(if fmt == "%H:%M" { a * 3600 + b * 60 } else { a * 60 + b })
+    Some(if fmt == "%H:%M" {
+        a * 3600 + b * 60
+    } else {
+        a * 60 + b
+    })
 }
 
 /// Human-readable / CSV text of a value.
@@ -103,12 +150,15 @@ pub fn parse_value(s: &str, f: &Field) -> Result<Value, DataError> {
     Ok(match f.ty {
         FieldType::Id | FieldType::Int => Value::Int(s.parse().map_err(|_| err("integer"))?),
         FieldType::Float => Value::Float(s.replace(',', ".").parse().map_err(|_| err("number"))?),
-        FieldType::Bool => Value::Bool(matches!(s.to_lowercase().as_str(), "1" | "true" | "yes" | "ja")),
-        FieldType::Date => Value::Date(
-            NaiveDate::parse_from_str(s, f.date_format()).map_err(|_| err("date"))?,
-        ),
+        FieldType::Bool => Value::Bool(matches!(
+            s.to_lowercase().as_str(),
+            "1" | "true" | "yes" | "ja"
+        )),
+        FieldType::Date => {
+            Value::Date(NaiveDate::parse_from_str(s, f.date_format()).map_err(|_| err("date"))?)
+        }
         FieldType::Time => Value::Time(parse_time(s, f.time_format()).ok_or_else(|| err("time"))?),
-        FieldType::Text | FieldType::Enum | FieldType::Images => Value::Text(s.to_string()),
+        FieldType::Text | FieldType::Enum | FieldType::Images | FieldType::ImageRef => Value::Text(s.to_string()),
     })
 }
 
@@ -142,8 +192,10 @@ pub fn from_json(j: &Json, f: &Field) -> Result<Value, DataError> {
         (Json::String(s), FieldType::Date) => {
             Value::Date(NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| bad())?)
         }
-        (Json::String(s), FieldType::Text | FieldType::Enum) => Value::Text(s.clone()),
-        (Json::Number(n), FieldType::Int | FieldType::Id) => Value::Int(n.as_i64().ok_or_else(bad)?),
+        (Json::String(s), FieldType::Text | FieldType::Enum | FieldType::ImageRef) => Value::Text(s.clone()),
+        (Json::Number(n), FieldType::Int | FieldType::Id) => {
+            Value::Int(n.as_i64().ok_or_else(bad)?)
+        }
         (Json::Number(n), FieldType::Float) => Value::Float(n.as_f64().ok_or_else(bad)?),
         (Json::Number(n), FieldType::Time) => Value::Time(n.as_u64().ok_or_else(bad)? as u32),
         (Json::Bool(b), FieldType::Bool) => Value::Bool(*b),
@@ -162,7 +214,11 @@ pub struct Row {
 
 impl Row {
     pub fn new(id: u64, values: Vec<Value>) -> Row {
-        Row { id, values, orphans: BTreeMap::new() }
+        Row {
+            id,
+            values,
+            orphans: BTreeMap::new(),
+        }
     }
 }
 
@@ -175,7 +231,11 @@ pub struct TableData {
 
 impl TableData {
     pub fn new(name: &str) -> Self {
-        TableData { name: name.into(), next_id: 1, rows: vec![] }
+        TableData {
+            name: name.into(),
+            next_id: 1,
+            rows: vec![],
+        }
     }
 
     /// A blank row with schema defaults (not yet inserted).
@@ -210,11 +270,17 @@ impl TableData {
             .terminator(csv::Terminator::CRLF)
             .from_writer(vec![]);
         for r in &self.rows {
-            let rec: Vec<String> =
-                table.fields.iter().zip(&r.values).map(|(f, v)| format_value(v, f)).collect();
+            let rec: Vec<String> = table
+                .fields
+                .iter()
+                .zip(&r.values)
+                .map(|(f, v)| format_value(v, f))
+                .collect();
             w.write_record(&rec)?;
         }
-        let bytes = w.into_inner().map_err(|e| DataError::Parse(e.to_string()))?;
+        let bytes = w
+            .into_inner()
+            .map_err(|e| DataError::Parse(e.to_string()))?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -274,7 +340,10 @@ fn cell_to_json(v: &Value, f: &Field) -> Json {
 fn cell_from_json(j: &Json, f: &Field) -> Result<Value, DataError> {
     match (j, f.ty) {
         (Json::Array(a), FieldType::Images) => Ok(Value::Text(
-            a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"),
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
         )),
         (Json::String(s), FieldType::Time) => parse_time(s, f.time_format())
             .map(Value::Time)
@@ -286,8 +355,16 @@ fn cell_from_json(j: &Json, f: &Field) -> Result<Value, DataError> {
 
 impl Store {
     pub fn new(schema: Schema) -> Store {
-        let tables = schema.tables.iter().map(|t| TableData::new(&t.name)).collect();
-        Store { schema, tables, orphan_tables: BTreeMap::new() }
+        let tables = schema
+            .tables
+            .iter()
+            .map(|t| TableData::new(&t.name))
+            .collect();
+        Store {
+            schema,
+            tables,
+            orphan_tables: BTreeMap::new(),
+        }
     }
 
     pub fn table_data(&self, name: &str) -> Option<&TableData> {
@@ -324,14 +401,20 @@ impl Store {
             tables.insert(k.clone(), v.clone());
         }
         let data = json!({"schema_version": self.schema.schema_version, "tables": tables});
-        (self.schema.to_json(), serde_json::to_string_pretty(&data).unwrap())
+        (
+            self.schema.to_json(),
+            serde_json::to_string_pretty(&data).unwrap(),
+        )
     }
 
     /// Load by field name. Returns the store and warnings (bad cells, orphans, old version).
     pub fn load(schema_json: &str, data_json: &str) -> Result<(Store, Vec<String>), DataError> {
-        let schema = Schema::from_json(schema_json)?;
+        let mut schema = Schema::from_json(schema_json)?;
         let data: Json = serde_json::from_str(data_json)?;
         let mut warnings = vec![];
+        if schema.upgrade_links() | schema.upgrade_image_info() {
+            warnings.push(UPGRADE_WARNING.to_string());
+        }
         if let Some(v) = data["schema_version"].as_u64() {
             if (v as u32) < schema.schema_version {
                 warnings.push(format!(
@@ -378,7 +461,14 @@ impl Store {
                         orphans.insert(k.clone(), j.clone());
                     }
                 }
-                let id = match obj.get(if table.id_index().is_some() { "id" } else { "_id" }).and_then(|j| j.as_u64()) {
+                let id = match obj
+                    .get(if table.id_index().is_some() {
+                        "id"
+                    } else {
+                        "_id"
+                    })
+                    .and_then(|j| j.as_u64())
+                {
                     Some(i) => i,
                     None => td.next_id,
                 };
@@ -392,7 +482,12 @@ impl Store {
             }
             store.tables[ti] = td;
         }
-        let n: usize = store.tables.iter().flat_map(|t| &t.rows).filter(|r| !r.orphans.is_empty()).count();
+        let n: usize = store
+            .tables
+            .iter()
+            .flat_map(|t| &t.rows)
+            .filter(|r| !r.orphans.is_empty())
+            .count();
         if n > 0 {
             warnings.push(format!("{n} rows carry orphaned values"));
         }
@@ -419,12 +514,34 @@ mod tests {
     }
 
     #[test]
+    fn image_ref_links() {
+        assert_eq!(film_row_for("images/roll_film/0012/x.jpg"), Some(("roll_film".into(), 12)));
+        assert_eq!(film_row_for("foo/bar"), None);
+        let sj = r#"{"name":"x","tables":[
+            {"name":"f","role":"film","fields":[{"name":"images","type":"images"}]},
+            {"name":"e","role":"enlargement","fields":[{"name":"src","type":"image_ref"}]},
+            {"name":"i","role":"image_info","fields":[{"name":"src","type":"image_ref"},{"name":"tags","type":"text"}]}]}"#;
+        let dj = r#"{"tables":{"e":{"next_id":3,"rows":[{"src":"images/f/0001/a.jpg"},{"src":"images/f/0001/b.jpg"},{"src":"images/f/0001/a.jpg"}]}}}"#;
+        let (s, w) = Store::load(sj, dj).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(enlargements_for(&s, "images/f/0001/a.jpg").len(), 2);
+        assert!(enlargements_for(&s, "nope").is_empty());
+        let (_, saved) = s.save();
+        let (s2, _) = Store::load(sj, &saved).unwrap();
+        assert_eq!(enlargements_for(&s2, "images/f/0001/b.jpg").len(), 1);
+        assert_eq!(image_info_for(&s2, "images/f/0001/a.jpg"), None);
+    }
+
+    #[test]
     fn images_roundtrip() {
         let sj = r#"{"name":"x","tables":[{"name":"t","fields":[{"name":"p","type":"images"}]}]}"#;
         let dj = r#"{"tables":{"t":{"next_id":2,"rows":[{"p":["a/1.jpg","b.png"]}]}}}"#;
         let (s, w) = Store::load(sj, dj).unwrap();
         assert!(w.is_empty(), "{w:?}");
-        assert_eq!(image_paths(&s.tables[0].rows[0].values[0]), vec!["a/1.jpg", "b.png"]);
+        assert_eq!(
+            image_paths(&s.tables[0].rows[0].values[0]),
+            vec!["a/1.jpg", "b.png"]
+        );
         let (_, d2) = s.save();
         assert!(d2.contains("\"b.png\""));
         assert_eq!(Store::load(sj, &d2).unwrap().0, s);
@@ -432,14 +549,15 @@ mod tests {
 
     #[test]
     fn sample_schema_valid() {
-        assert_eq!(schema().tables.len(), 3);
+        assert_eq!(schema().tables.len(), 4);
     }
 
     #[test]
     fn roll_film_csv() {
         let s = schema();
         let t = s.table("roll_film").unwrap();
-        let td = TableData::from_csv(t, include_str!("../../../tests/fixtures/roll_film.csv")).unwrap();
+        let td =
+            TableData::from_csv(t, include_str!("../../../tests/fixtures/roll_film.csv")).unwrap();
         assert_eq!(td.rows.len(), 3);
         assert_eq!(td.next_id, 4);
         assert_eq!(td.rows[0].values[7], Value::Time(11 * 60 + 30));
@@ -456,7 +574,8 @@ mod tests {
     fn enlargement_csv_without_id() {
         let s = schema();
         let t = s.table("enlargement").unwrap();
-        let td = TableData::from_csv(t, include_str!("../../../tests/fixtures/enlargement.csv")).unwrap();
+        let td = TableData::from_csv(t, include_str!("../../../tests/fixtures/enlargement.csv"))
+            .unwrap();
         assert_eq!(td.rows.len(), 1);
         assert_eq!(td.rows[0].id, 1);
         assert_eq!(td.rows[0].values[4], Value::Time(12));
@@ -487,16 +606,22 @@ mod tests {
     }
 
     fn small(fields: &str) -> String {
-        format!(r#"{{"name":"x","schema_version":2,"tables":[{{"name":"t","fields":[{fields}]}}]}}"#)
+        format!(
+            r#"{{"name":"x","schema_version":2,"tables":[{{"name":"t","fields":[{fields}]}}]}}"#
+        )
     }
     const A: &str = r#"{"name":"a","type":"text"}"#;
     const B: &str = r#"{"name":"b","type":"int"}"#;
-    const DATA: &str = r#"{"schema_version":2,"tables":{"t":{"next_id":2,"rows":[{"a":"x","b":5}]}}}"#;
+    const DATA: &str =
+        r#"{"schema_version":2,"tables":{"t":{"next_id":2,"rows":[{"a":"x","b":5}]}}}"#;
 
     #[test]
     fn reorder_fields_keeps_data() {
         let (s, _) = Store::load(&small(&format!("{B},{A}")), DATA).unwrap();
-        assert_eq!(s.tables[0].rows[0].values, vec![Value::Int(5), Value::Text("x".into())]);
+        assert_eq!(
+            s.tables[0].rows[0].values,
+            vec![Value::Int(5), Value::Text("x".into())]
+        );
     }
 
     #[test]
@@ -529,7 +654,9 @@ mod tests {
     fn bad_csv_cell_reports_row() {
         let s = schema();
         let t = s.table("roll_film").unwrap();
-        let e = TableData::from_csv(t, "1,notadate,x\n").unwrap_err().to_string();
+        let e = TableData::from_csv(t, "1,notadate,x\n")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("row 1") && e.contains("date"), "{e}");
     }
 }
@@ -562,18 +689,35 @@ pub mod fs {
 
     /// Copy `source` into `<archive>/images/<table>/<row id>/` and return the archive-relative
     /// path (forward slashes). Identical existing files are reused; name clashes get a suffix.
-    pub fn import_image(archive: &Path, table: &str, row_id: u64, source: &Path) -> std::io::Result<String> {
-        let name = source.file_name().ok_or_else(|| std::io::Error::other("no file name"))?;
+    pub fn import_image(
+        archive: &Path,
+        table: &str,
+        row_id: u64,
+        source: &Path,
+    ) -> std::io::Result<String> {
+        let name = source
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("no file name"))?;
         let rel_dir = format!("images/{table}/{row_id:04}");
         let dir = archive.join(&rel_dir);
         std::fs::create_dir_all(&dir)?;
         let (stem, ext) = (
-            source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            source.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default(),
+            source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            source
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default(),
         );
         let mut n = 0;
         loop {
-            let fname = if n == 0 { name.to_string_lossy().into_owned() } else { format!("{stem}-{n}{ext}") };
+            let fname = if n == 0 {
+                name.to_string_lossy().into_owned()
+            } else {
+                format!("{stem}-{n}{ext}")
+            };
             let target = dir.join(&fname);
             if !target.exists() {
                 std::fs::copy(source, &target)?;
@@ -591,9 +735,13 @@ pub mod fs {
         let mut used = std::collections::HashSet::new();
         for (t, td) in store.schema.tables.iter().zip(&store.tables) {
             for (i, f) in t.fields.iter().enumerate() {
-                if f.ty == FieldType::Images {
+                if matches!(f.ty, FieldType::Images | FieldType::ImageRef) {
                     for r in &td.rows {
-                        used.extend(image_paths(&r.values[i]).into_iter().map(|p| archive.join(p)));
+                        used.extend(
+                            image_paths(&r.values[i])
+                                .into_iter()
+                                .map(|p| archive.join(p)),
+                        );
                     }
                 }
             }
@@ -601,7 +749,9 @@ pub mod fs {
         let mut out = vec![];
         let mut stack = vec![archive.join("images")];
         while let Some(d) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {
@@ -636,7 +786,8 @@ mod fs_tests {
         let dir = std::env::temp_dir().join("fa_fs_test");
         std::fs::create_dir_all(&dir).unwrap();
         let (s, d) = (dir.join("a.schema.json"), dir.join("a.data.json"));
-        let schema = fa_schema::Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap();
+        let schema =
+            fa_schema::Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap();
         let store = crate::Store::new(schema);
         super::fs::save(&store, &s, &d).unwrap();
         super::fs::save(&store, &s, &d).unwrap();
@@ -659,7 +810,10 @@ mod image_tests {
         let r1 = fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap();
         assert_eq!(r1, "images/roll_film/0001/a.jpg");
         // identical file is reused
-        assert_eq!(fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap(), r1);
+        assert_eq!(
+            fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap(),
+            r1
+        );
         // different content with the same name gets a suffix
         std::fs::write(src.join("a.jpg"), b"two").unwrap();
         let r2 = fs::import_image(&arch, "roll_film", 1, &src.join("a.jpg")).unwrap();

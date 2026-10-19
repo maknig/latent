@@ -29,10 +29,12 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     }
+    let mut upgraded = false;
     let store = if data_path.exists() {
         match fa_data::fs::load(&schema_path, &data_path) {
             Ok((s, w)) => {
                 for m in w {
+                    upgraded |= m == fa_data::UPGRADE_WARNING;
                     eprintln!("warning: {m}");
                 }
                 s
@@ -54,6 +56,7 @@ fn main() -> eframe::Result {
     };
 
     let mut app = fa_ui::App::new(store);
+    app.engine.dirty = upgraded;
     app.base_dir = dir;
     app.on_save = Some(Box::new(move |s| {
         fa_data::fs::save(s, &schema_path, &data_path).map_err(|e| e.to_string())

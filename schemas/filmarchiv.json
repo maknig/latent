@@ -3,7 +3,19 @@
   "schema_version": 1,
   "tables": [
     {
-      "name": "roll_film", "label": "Rollfilme",
+      "name": "roll_film", "label": "Rollfilme", "role": "film",
+      "card": {
+        "x": 40, "y": 20, "width": 130, "bottom_margin": 20, "label_width": 25,
+        "height_field": "format",
+        "heights": {"135er": 36, "120er": 58, "4x5 Inch": 58, "default": 58},
+        "cells": [
+          [{"field": "id", "label": "Film Nr."}, {"field": "iso", "label": "ISO", "at": 65, "value_at": 95}],
+          [{"field": "date", "label": "Datum"}, {"field": "developer", "label": "Entwickler", "at": 65, "value_at": 95}],
+          [{"field": "film_name", "label": "Film Typ"}, {"field": "dev_time", "label": "Entw. Zeit", "at": 65, "value_at": 95}],
+          [{"field": "camera", "label": "Kamera"}, {"field": "dev_temp", "label": "Temperatur", "at": 65, "value_at": 95}]
+        ],
+        "text": {"field": "motiv", "label": "Motiv"}
+      },
       "fields": [
         {"name": "id", "type": "id", "label": "ID", "readonly": true},
         {"name": "date", "type": "date", "label": "Datum", "format": "%d.%m.%Y", "default": "today"},
@@ -19,7 +31,19 @@
       ]
     },
     {
-      "name": "plan_film", "label": "Planfilme",
+      "name": "plan_film", "label": "Planfilme", "role": "film",
+      "card": {
+        "x": 40, "y": 20, "width": 130, "bottom_margin": 20, "label_width": 25,
+        "height_field": "format",
+        "heights": {"135er": 36, "120er": 58, "4x5 Inch": 58, "default": 58},
+        "cells": [
+          [{"field": "id", "label": "Film Nr."}, {"field": "iso", "label": "ISO", "at": 65, "value_at": 95}],
+          [{"field": "date", "label": "Datum"}, {"field": "developer", "label": "Entwickler", "at": 65, "value_at": 95}],
+          [{"field": "film_name", "label": "Film Typ"}, {"field": "dev_time", "label": "Entw. Zeit", "at": 65, "value_at": 95}],
+          [{"field": "camera", "label": "Kamera"}, {"field": "dev_temp", "label": "Temperatur", "at": 65, "value_at": 95}]
+        ],
+        "text": {"field": "motiv", "label": "Motiv"}
+      },
       "fields": [
         {"name": "id", "type": "id", "label": "ID", "readonly": true},
         {"name": "date", "type": "date", "label": "Datum", "format": "%d.%m.%Y", "default": "today"},
@@ -39,7 +63,7 @@
       ]
     },
     {
-      "name": "enlargement", "label": "Vergrösserungen",
+      "name": "enlargement", "label": "Vergrösserungen", "role": "enlargement",
       "fields": [
         {"name": "date", "type": "date", "label": "Datum", "format": "%d.%m.%Y", "default": "today"},
         {"name": "enlarger", "type": "text", "label": "Vergrösserer"},
@@ -51,7 +75,16 @@
         {"name": "developer", "type": "text", "label": "Entwickler"},
         {"name": "develop_time", "type": "time", "label": "Entwicklungszeit", "format": "%M:%S"},
         {"name": "notice", "type": "text", "label": "Notizen", "multiline": true},
+        {"name": "source_image", "type": "image_ref", "label": "Quellbild"},
         {"name": "images", "type": "images", "label": "Bilder", "visible_in_table": false}
+      ]
+    },
+    {
+      "name": "image_info", "label": "Bildinfo", "role": "image_info",
+      "fields": [
+        {"name": "source_image", "type": "image_ref", "label": "Bild"},
+        {"name": "tags", "type": "text", "label": "Tags"},
+        {"name": "location", "type": "text", "label": "Ort"}
       ]
     }
   ]

@@ -4,9 +4,61 @@ use egui_extras::{Column, TableBuilder};
 use fa_data::{default_value, format_value, parse_value, Store, TableData, Value};
 use fa_engine::{Engine, Query};
 use fa_schema::{Field, FieldType};
+#[cfg(not(target_arch = "wasm32"))]
+use fa_schema::TableRole;
 
 #[cfg(not(target_arch = "wasm32"))]
+mod histogram;
+mod print;
+#[cfg(not(target_arch = "wasm32"))]
 mod images;
+
+/// Decoded preview texture plus its histogram and black/white points.
+#[cfg(not(target_arch = "wasm32"))]
+type Shown = (egui::TextureHandle, Option<(histogram::Histogram, (f32, f32), (f32, f32))>);
+
+/// Open image view: which film row and image, plus the text being edited.
+#[cfg(not(target_arch = "wasm32"))]
+struct Preview {
+    table: usize,
+    row: u64,
+    index: usize,
+    /// Archive-relative path whose info is in `tags` / `location`.
+    loaded: Option<String>,
+    tags: String,
+    location: String,
+    /// 1.0 fits the image to the view.
+    zoom: f32,
+    black: bool,
+    white: bool,
+    /// Last decoded image with its histogram and black/white points; shown while the next one loads.
+    shown: Option<Shown>,
+    /// Direction of the last Back/Next (-1 or 1); the image that way is preloaded.
+    dir: i32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Preview {
+    fn new(table: usize, row: u64, index: usize) -> Self {
+        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1 }
+    }
+}
+
+/// Qt-style marker: circle at `pos` (0..1 within `rect`), a line to a label placed 15% towards the image centre.
+#[cfg(not(target_arch = "wasm32"))]
+fn annotate(painter: &egui::Painter, rect: egui::Rect, pos: (f32, f32), label: &str, color: egui::Color32) {
+    let p = rect.min + egui::vec2(pos.0 * rect.width(), pos.1 * rect.height());
+    let dx = rect.width() * 0.15 * if pos.0 < 0.5 { 1.0 } else { -1.0 };
+    let dy = rect.height() * 0.15 * if pos.1 < 0.5 { 1.0 } else { -1.0 };
+    let tp = p + egui::vec2(dx, dy);
+    painter.line_segment([p, tp], egui::Stroke::new(2.0_f32, color));
+    painter.circle_stroke(p, 10.0, egui::Stroke::new(2.0_f32, color));
+    let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(14.0), egui::Color32::WHITE);
+    let box_rect = egui::Rect::from_min_size(tp, galley.size() + egui::vec2(10.0, 6.0));
+    painter.rect_filled(box_rect, 2.0, color);
+    painter.galley(tp + egui::vec2(5.0, 3.0), galley, egui::Color32::WHITE);
+}
+
 
 enum Msg {
     Csv(String),
@@ -47,12 +99,39 @@ fn apply_theme(ctx: &egui::Context) {
     });
 }
 
-type SaveHook = Box<dyn FnMut(&Store) -> Result<(), String>>;
+/// Form editor for an `image_ref`: thumbnail, path and buttons. Returns true when "Choose..." was clicked.
+#[cfg(not(target_arch = "wasm32"))]
+fn image_ref_editor(ui: &mut egui::Ui, ctx: &egui::Context, thumbs: &mut images::Thumbs, base_dir: &std::path::Path, text: &mut String) -> bool {
+    let mut choose = false;
+    if !text.trim().is_empty() {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 72.0), egui::Sense::hover());
+        thumbs.paint(ui, ctx, &base_dir.join(text.trim()), rect, 320);
+    }
+    ui.vertical(|ui| {
+        ui.label(if text.trim().is_empty() { "(none)" } else { text.trim() });
+        ui.horizontal(|ui| {
+            choose = ui.button("Choose...").clicked();
+            if ui.add_enabled(!text.is_empty(), egui::Button::new("Clear")).clicked() {
+                text.clear();
+            }
+        });
+    });
+    choose
+}
+
+type SaveHook =Box<dyn FnMut(&Store) -> Result<(), String>>;
 
 struct Form {
     id: Option<u64>,
     texts: Vec<String>,
     errors: Vec<String>,
+}
+
+/// Dialog for choosing the film image an enlargement comes from.
+#[cfg(not(target_arch = "wasm32"))]
+struct Picker {
+    table: usize,
+    row: Option<u64>,
 }
 
 pub struct App {
@@ -67,16 +146,25 @@ pub struct App {
     /// Save to eframe storage (localStorage on web) for autosave.
     pub persist: bool,
     styled: bool,
+    col_widths: std::collections::HashMap<(usize, usize), f32>,
     show_filters: bool,
+    /// Open print dialog.
+    print: Option<print::PrintOpts>,
     /// Pending "delete unused images" confirmation.
     #[cfg(not(target_arch = "wasm32"))]
     unused: Option<Vec<std::path::PathBuf>>,
     /// Directory image paths are relative to (the data file's folder).
     pub base_dir: std::path::PathBuf,
+    /// Row ids of the current table after search/filter/sort (see `update`).
+    ids: Vec<u64>,
+    /// Duration of the previous frame, shown in the status bar.
+    frame_ms: f32,
     #[cfg(not(target_arch = "wasm32"))]
     thumbs: images::Thumbs,
     #[cfg(not(target_arch = "wasm32"))]
-    preview: Option<std::path::PathBuf>,
+    preview: Option<Preview>,
+    #[cfg(not(target_arch = "wasm32"))]
+    picker: Option<Picker>,
     /// Per-column filter inputs (a, b); b is the range end.
     filters: Vec<(String, String)>,
     tx: std::sync::mpsc::Sender<Msg>,
@@ -96,18 +184,65 @@ impl App {
             on_save: None,
             persist: false,
             styled: false,
+            col_widths: Default::default(),
             show_filters: false,
+            print: None,
             #[cfg(not(target_arch = "wasm32"))]
             unused: None,
             base_dir: ".".into(),
+            ids: vec![],
+            frame_ms: 0.0,
             #[cfg(not(target_arch = "wasm32"))]
             thumbs: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             preview: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            picker: None,
             filters: vec![],
             tx,
             rx,
         }
+    }
+
+    /// Show another table with a clean query and no selection.
+    fn switch_table(&mut self, table: usize) {
+        self.table = table;
+        self.query = Query::default();
+        self.filters.clear();
+        self.selected = None;
+        self.form = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.picker = None;
+        }
+    }
+
+    /// Enlargement table index and its `image_ref` field, if the schema defines them.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn enlargement_target(&self) -> Option<(usize, usize)> {
+        let s = &self.engine.store.schema;
+        let ti = s.role_index(TableRole::Enlargement)?;
+        Some((ti, s.tables[ti].image_ref_index()?))
+    }
+
+    /// Open the enlargement table's form for a new row whose source is `path`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new_enlargement(&mut self, path: String) {
+        let Some((ti, fi)) = self.enlargement_target() else { return };
+        self.switch_table(ti);
+        self.open_form(None);
+        if let Some(form) = &mut self.form {
+            form.texts[fi] = path;
+        }
+    }
+
+    /// Show the enlargement table filtered to the rows made from `path`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn show_enlargements(&mut self, path: String) {
+        let Some((ti, fi)) = self.enlargement_target() else { return };
+        self.switch_table(ti);
+        self.filters.resize(self.engine.store.schema.tables[ti].fields.len(), Default::default());
+        self.filters[fi].0 = path;
     }
 
     fn open_form(&mut self, id: Option<u64>) {
@@ -201,6 +336,83 @@ impl App {
         });
     }
 
+    fn open_print(&mut self) {
+        let t = &self.engine.store.schema.tables[self.table];
+        let columns = (0..t.fields.len())
+            .filter(|&i| t.fields[i].visible_in_table && !matches!(t.fields[i].ty, FieldType::Images | FieldType::ImageRef))
+            .collect();
+        self.print = Some(print::PrintOpts {
+            layout: print::Layout::Table,
+            landscape: false,
+            title: t.label().to_string(),
+            columns,
+            selected_only: false,
+        });
+    }
+
+    fn print_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut o) = self.print.take() else { return };
+        let t = self.engine.store.schema.tables[self.table].clone();
+        let (mut open, mut create) = (true, false);
+        // A schema card is a fixed sheet layout: no orientation, title or column choice.
+        let fixed = o.layout == print::Layout::Cards && t.card.is_some();
+        egui::Window::new("Print").open(&mut open).collapsible(false).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut o.layout, print::Layout::Table, "Table");
+                ui.radio_value(&mut o.layout, print::Layout::Cards, "Cards");
+            });
+            ui.add_enabled(!fixed, egui::Checkbox::new(&mut o.landscape, "Landscape"));
+            ui.add_enabled(self.selected.is_some(), egui::Checkbox::new(&mut o.selected_only, "Selected row only"));
+            if fixed {
+                ui.label("Film sheet layout from the schema (portrait, fixed size).");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Title");
+                    ui.text_edit_singleline(&mut o.title);
+                });
+            }
+            ui.separator();
+            for (i, f) in t.fields.iter().enumerate() {
+                if fixed || matches!(f.ty, FieldType::Images | FieldType::ImageRef) {
+                    continue;
+                }
+                let mut on = o.columns.contains(&i);
+                if ui.checkbox(&mut on, f.label()).changed() {
+                    o.columns.retain(|&c| c != i);
+                    if on {
+                        o.columns.push(i);
+                        o.columns.sort_unstable();
+                    }
+                }
+            }
+            ui.separator();
+            create = ui.add_enabled(fixed || !o.columns.is_empty(), egui::Button::new("Create PDF...")).clicked();
+        });
+        if create {
+            let ids = match (o.selected_only, self.selected) {
+                (true, Some(id)) => vec![id],
+                _ => self.ids.clone(),
+            };
+            let card = t.card.as_ref().filter(|_| fixed);
+            let (pdf, count) = match (card, print::card_rows(&self.engine.store, self.table, &ids)) {
+                (Some(card), Some(rows)) => (print::render_cards_pdf(card, &rows), rows.len()),
+                _ => {
+                    let (headers, rows) = print::table_rows(&self.engine.store, self.table, &ids, &o.columns);
+                    (print::render_pdf(&headers, &rows, &o), rows.len())
+                }
+            };
+            let name = format!("{}.pdf", t.name);
+            spawn(async move {
+                if let Some(h) = rfd::AsyncFileDialog::new().set_file_name(name).save_file().await {
+                    let _ = h.write(&pdf).await;
+                }
+            });
+            self.status = format!("PDF with {count} row(s) created");
+        } else if open {
+            self.print = Some(o);
+        }
+    }
+
     fn poll(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
@@ -247,7 +459,8 @@ impl App {
         };
     }
 
-    fn field_editor(ui: &mut egui::Ui, f: &Field, text: &mut String) {
+    fn field_editor(ui: &mut egui::Ui, f: &Field, text: &mut String) -> Option<f32> {
+        let mut right = None;
         match f.ty {
             FieldType::Id => {
                 ui.label(text.as_str());
@@ -272,7 +485,7 @@ impl App {
                 }
             }
             _ if f.multiline => {
-                ui.add(egui::TextEdit::multiline(text).desired_rows(3).desired_width(300.0));
+                right = Some(ui.add(egui::TextEdit::multiline(text).desired_rows(3).desired_width(300.0)).rect.right());
             }
             _ => {
                 let hint = match f.ty {
@@ -280,12 +493,13 @@ impl App {
                     FieldType::Time => f.time_format().replace("%M", "mm").replace("%S", "ss").replace("%H", "hh"),
                     _ => String::new(),
                 };
-                ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(300.0));
+                right = Some(ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(300.0)).rect.right());
                 if let Some(u) = &f.unit {
                     ui.label(u);
                 }
             }
         }
+        right
     }
 
     /// Index of the table's first `images` field.
@@ -340,6 +554,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn finish_copy(&mut self, table: usize, id: u64, new: Vec<String>, errs: Vec<String>) {
         let n = new.len();
+        self.thumbs.forget_missing();
         if table == self.table && self.selected == Some(id) {
             let mut paths = self.selected_paths();
             for p in new {
@@ -363,9 +578,15 @@ impl App {
         if self.image_field().is_none() {
             return;
         }
-        let paths = self.selected_paths();
+        let own = self.selected_paths();
+        let skip = self.source_tiles();
+        let paths = self.selected.map(|id| self.row_image_paths(self.table, id)).unwrap_or_default();
         let mut remove = None;
         let mut add = false;
+        // Enlargements per image; only film tables link to the enlargement table.
+        let linkable = self.engine.store.schema.tables[self.table].role == Some(TableRole::Film) && self.enlargement_target().is_some();
+        let counts: Vec<usize> = paths.iter().map(|p| if linkable { fa_data::enlargements_for(&self.engine.store, p).len() } else { 0 }).collect();
+        let (mut new_enl, mut show_enl) = (None, None);
         egui::TopBottomPanel::bottom("images").resizable(true).default_height(150.0).min_height(60.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Images").strong());
@@ -376,46 +597,71 @@ impl App {
                     ui.weak("select a row to see its images (or drop files here)");
                 }
             });
-            let size = (ui.available_height() - 12.0).clamp(48.0, 400.0);
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
+            let size = (ui.available_height() - ui.spacing().scroll.allocated_width() - 4.0).clamp(48.0, 400.0);
+            egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+                if ui.rect_contains_pointer(ui.clip_rect()) {
+                    let d = ctx.input(|i| i.smooth_scroll_delta);
+                    ui.scroll_with_delta(egui::vec2(d.y, 0.0));
+                }
+                ui.horizontal_top(|ui| {
                     for (n, p) in paths.iter().enumerate() {
                         let full = self.resolve(p);
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(size * 1.3, size), egui::Sense::click());
-                        match self.thumbs.get(ctx, &full, 320) {
-                            images::Thumb::Ready(tex) => {
-                                let s = tex.size_vec2();
-                                let scale = (rect.width() / s.x).min(rect.height() / s.y);
-                                let r = egui::Rect::from_center_size(rect.center(), s * scale);
-                                ui.painter().image(tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-                            }
-                            images::Thumb::Loading => {
-                                ui.put(rect, egui::Spinner::new());
-                            }
-                            images::Thumb::Missing => {
-                                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(45));
-                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "missing", egui::FontId::proportional(12.0), egui::Color32::GRAY);
-                            }
+                        if ui.is_rect_visible(rect) {
+                            self.thumbs.paint(ui, ctx, &full, rect, 320);
+                        }
+                        let is_source = n < skip;
+                        if is_source {
+                            let tag = egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 4.0), egui::vec2(64.0, 16.0));
+                            ui.painter().rect_filled(tag, 8.0, egui::Color32::BLACK);
+                            ui.painter().rect_stroke(tag, 8.0, egui::Stroke::new(1.0_f32, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                            ui.painter().text(tag.center(), egui::Align2::CENTER_CENTER, "Negativ", egui::FontId::proportional(12.0), egui::Color32::WHITE);
+                        }
+                        if counts[n] > 0 {
+                            let badge = egui::Rect::from_min_size(rect.right_top() + egui::vec2(-26.0, 4.0), egui::vec2(22.0, 16.0));
+                            ui.painter().rect_filled(badge, 8.0, egui::Color32::from_rgb(70, 130, 200));
+                            ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, counts[n].to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
                         }
                         if resp.double_clicked() {
-                            self.preview = Some(full);
+                            self.preview = self.selected.map(|row| Preview::new(self.table, row, n));
                         }
                         resp.on_hover_text(p).context_menu(|ui| {
                             if ui.button("Open large").clicked() {
-                                self.preview = Some(self.resolve(p));
+                                self.preview = self.selected.map(|row| Preview::new(self.table, row, n));
                                 ui.close_menu();
                             }
-                            if ui.button("Remove").clicked() {
-                                remove = Some(n);
+                            if linkable {
+                                if ui.button("New enlargement").clicked() {
+                                    new_enl = Some(p.clone());
+                                    ui.close_menu();
+                                }
+                                if ui.add_enabled(counts[n] > 0, egui::Button::new(format!("Show enlargements ({})", counts[n]))).clicked() {
+                                    show_enl = Some(p.clone());
+                                    ui.close_menu();
+                                }
+                            }
+                            if !is_source && ui.button("Remove").clicked() {
+                                remove = Some(n - skip);
                                 ui.close_menu();
                             }
                         });
+                        if n + 1 == skip {
+                            ui.separator();
+                        }
                     }
                 });
             });
         });
+        if let Some(p) = new_enl {
+            self.new_enlargement(p);
+            return;
+        }
+        if let Some(p) = show_enl {
+            self.show_enlargements(p);
+            return;
+        }
         if let Some(n) = remove {
-            let mut p = paths;
+            let mut p = own;
             p.remove(n);
             self.set_selected_paths(p);
         }
@@ -434,6 +680,70 @@ impl App {
         }
     }
 
+    /// Pick a film, then one of its images, as the source of the enlargement being edited.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn picker_window(&mut self, ctx: &egui::Context) {
+        let Some(mut pk) = self.picker.take() else { return };
+        let Some((_, fi)) = self.enlargement_target() else { return };
+        let schema = self.engine.store.schema.clone();
+        let films: Vec<usize> = (0..schema.tables.len()).filter(|&i| schema.tables[i].role == Some(TableRole::Film)).collect();
+        let (mut open, mut chosen) = (true, None);
+        egui::Window::new("Choose source image").open(&mut open).default_size([520.0, 420.0]).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Film table");
+                egui::ComboBox::from_id_salt("pick_table").selected_text(schema.tables[pk.table].label()).show_ui(ui, |ui| {
+                    for &i in &films {
+                        if ui.selectable_value(&mut pk.table, i, schema.tables[i].label()).clicked() {
+                            pk.row = None;
+                        }
+                    }
+                });
+            });
+            let t = &schema.tables[pk.table];
+            let td = &self.engine.store.tables[pk.table];
+            let label_cols: Vec<usize> = (0..t.fields.len()).filter(|&i| t.fields[i].visible_in_table && t.fields[i].ty != FieldType::Id).take(3).collect();
+            egui::ScrollArea::vertical().id_salt("pick_rows").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
+                for r in &td.rows {
+                    let text = label_cols.iter().map(|&i| format_value(&r.values[i], &t.fields[i])).collect::<Vec<_>>().join("  ");
+                    if ui.selectable_label(pk.row == Some(r.id), format!("#{}  {text}", r.id)).clicked() {
+                        pk.row = Some(r.id);
+                    }
+                }
+            });
+            ui.separator();
+            let paths = match (t.images_index(), pk.row.and_then(|id| td.rows.iter().find(|r| r.id == id))) {
+                (Some(ii), Some(r)) => fa_data::image_paths(&r.values[ii]),
+                _ => vec![],
+            };
+            if pk.row.is_some() && paths.is_empty() {
+                ui.weak("This film has no images.");
+            }
+            egui::ScrollArea::horizontal().id_salt("pick_imgs").show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    for p in &paths {
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 110.0), egui::Sense::click());
+                        let full = std::path::Path::new(p).to_path_buf();
+                        let full = if full.is_absolute() { full } else { self.base_dir.join(full) };
+                        self.thumbs.paint(ui, ctx, &full, rect, 320);
+                        if resp.hovered() {
+                            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(70, 130, 200)), egui::StrokeKind::Inside);
+                        }
+                        if resp.on_hover_text(p).clicked() {
+                            chosen = Some(p.clone());
+                        }
+                    }
+                });
+            });
+        });
+        if let Some(p) = chosen {
+            if let Some(form) = &mut self.form {
+                form.texts[fi] = p;
+            }
+        } else if open {
+            self.picker = Some(pk);
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn unused_dialog(&mut self, ctx: &egui::Context) {
         let Some(files) = self.unused.clone() else { return };
@@ -449,11 +759,13 @@ impl App {
                     }
                 });
             }
-            ui.horizontal(|ui| {
-                if !files.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if files.is_empty() {
+                    cancel = ui.button("OK").clicked();
+                } else {
                     delete = ui.button("Delete").clicked();
+                    cancel = ui.button("Cancel").clicked();
                 }
-                cancel = ui.button(if files.is_empty() { "OK" } else { "Cancel" }).clicked();
             });
         });
         if delete {
@@ -469,26 +781,246 @@ impl App {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn preview_window(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.preview.clone() else { return };
-        let mut open = true;
-        egui::Window::new(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
-            .open(&mut open)
-            .default_size([700.0, 500.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                let avail = ui.available_size();
-                if let images::Thumb::Ready(tex) = self.thumbs.get(ctx, &path, 2048) {
-                    let s = tex.size_vec2();
-                    let scale = (avail.x / s.x).min(avail.y / s.y);
-                    ui.centered_and_justified(|ui| ui.image((tex.id(), s * scale)));
-                } else {
-                    ui.spinner();
+    fn preview_paths(&self, pv: &Preview) -> Vec<String> {
+        self.row_image_paths(pv.table, pv.row)
+    }
+
+    /// Images shown for a row: for an enlargement its Quellbild first, then its own images.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn row_image_paths(&self, table: usize, id: u64) -> Vec<String> {
+        let t = &self.engine.store.schema.tables[table];
+        let Some(fi) = t.images_index() else { return vec![] };
+        let Some(row) = self.engine.store.tables[table].rows.iter().find(|r| r.id == id) else { return vec![] };
+        let mut paths = vec![];
+        if t.role == Some(TableRole::Enlargement) {
+            if let Some(Value::Text(s)) = t.image_ref_index().map(|i| &row.values[i]) {
+                if !s.trim().is_empty() {
+                    paths.push(s.trim().to_string());
                 }
-            });
-        if !open {
-            self.preview = None;
+            }
         }
+        paths.extend(fa_data::image_paths(&row.values[fi]));
+        paths
+    }
+
+    /// Number of leading strip tiles that are not the row's own images (the Quellbild).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn source_tiles(&self) -> usize {
+        let Some(id) = self.selected else { return 0 };
+        self.row_image_paths(self.table, id).len() - self.selected_paths().len()
+    }
+
+    /// (tags, location) stored for the image `rel`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn image_info(&self, rel: &str) -> (String, String) {
+        let store = &self.engine.store;
+        let Some(ti) = store.schema.role_index(TableRole::ImageInfo) else { return Default::default() };
+        let t = &store.schema.tables[ti];
+        let (Some(tg), Some(lc), Some(id)) = (t.field_index("tags"), t.field_index("location"), fa_data::image_info_for(store, rel)) else { return Default::default() };
+        let Some(row) = store.tables[ti].rows.iter().find(|r| r.id == id) else { return Default::default() };
+        let text = |v: &Value| if let Value::Text(s) = v { s.clone() } else { String::new() };
+        (text(&row.values[tg]), text(&row.values[lc]))
+    }
+
+    /// Store tags and location of image `rel`; creates the `image_info` row on first non-empty edit.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn commit_info(&mut self, rel: &str, tags: &str, location: &str) {
+        let store = &self.engine.store;
+        let Some(ti) = store.schema.role_index(TableRole::ImageInfo) else { return };
+        let t = &store.schema.tables[ti];
+        let (Some(rf), Some(tg), Some(lc)) = (t.image_ref_index(), t.field_index("tags"), t.field_index("location")) else { return };
+        let name = t.name.clone();
+        let text = |s: &str| if s.trim().is_empty() { Value::Null } else { Value::Text(s.trim().to_string()) };
+        match fa_data::image_info_for(store, rel) {
+            Some(id) => {
+                let Some(row) = store.tables[ti].rows.iter().find(|r| r.id == id) else { return };
+                let mut values = row.values.clone();
+                values[tg] = text(tags);
+                values[lc] = text(location);
+                self.engine.update(&name, id, values);
+            }
+            None if tags.trim().is_empty() && location.trim().is_empty() => {}
+            None => {
+                let mut values = TableData::blank_values(t);
+                values[rf] = Value::Text(rel.to_string());
+                values[tg] = text(tags);
+                values[lc] = text(location);
+                self.engine.insert(&name, values);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn preview_window(&mut self, ctx: &egui::Context) {
+        let Some(mut pv) = self.preview.take() else { return };
+        let paths = self.preview_paths(&pv);
+        if paths.is_empty() {
+            return;
+        }
+        pv.index = pv.index.min(paths.len() - 1);
+        let rel = paths[pv.index].clone();
+        if pv.loaded.as_deref() != Some(rel.as_str()) {
+            (pv.tags, pv.location) = self.image_info(&rel);
+            pv.loaded = Some(rel.clone());
+        }
+        let full = self.resolve(&rel);
+        let (mut step, mut close) = (0i32, false);
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    step = -1;
+                }
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    step = 1;
+                }
+                close = i.key_pressed(egui::Key::Escape);
+            });
+        }
+        // Keep showing the previous image (with its own histogram and markers) until this one is decoded.
+        let ready = match self.thumbs.get(ctx, &full, 2048) {
+            images::Thumb::Ready(t) => Some(t.clone()),
+            _ => None,
+        };
+        let loading = ready.is_none();
+        if let Some(t) = ready {
+            let stats = self.thumbs.stats(&full, 2048).map(|s| (s.hist, s.black, s.white));
+            pv.shown = Some((t, stats));
+        }
+        // Decode the next image in the direction of travel once this one is on screen, so Back/Next is quick.
+        let ahead = if pv.dir < 0 { pv.index.checked_sub(1) } else { Some(pv.index + 1) };
+        if let Some(j) = ahead.filter(|&j| !loading && j < paths.len()) {
+            let p = self.resolve(&paths[j]);
+            self.thumbs.preload(ctx, &p, 2048);
+        }
+        let tex = pv.shown.as_ref().map(|(t, _)| (t.id(), t.size_vec2()));
+        let stats = pv.shown.as_ref().and_then(|(_, s)| *s);
+        let table = &self.engine.store.schema.tables[pv.table];
+        let heading = format!("{} #{}", table.label(), pv.row);
+        let details: Vec<(String, String)> = self.engine.store.tables[pv.table]
+            .rows
+            .iter()
+            .find(|r| r.id == pv.row)
+            .map(|r| {
+                table
+                    .fields
+                    .iter()
+                    .zip(&r.values)
+                    .filter(|(f, _)| f.ty != FieldType::Images)
+                    .map(|(f, v)| (f.label.clone().unwrap_or_else(|| f.name.clone()), format_value(v, f)))
+                    .filter(|(_, v)| !v.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        const SIDE: f32 = 256.0;
+        const VIEW: egui::Vec2 = egui::vec2(640.0, 520.0);
+        let (mut open, mut commit) = (true, false);
+        egui::Window::new(full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+            .id(egui::Id::new("image_preview_v2"))
+            .open(&mut open)
+            .auto_sized()
+            .show(ctx, |ui| {
+                ui.set_max_width(VIEW.x + SIDE + ui.spacing().item_spacing.x);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(pv.index > 0, egui::Button::new("◀ Back")).clicked() {
+                        step = -1;
+                    }
+                    ui.label(format!("{} / {}", pv.index + 1, paths.len()));
+                    if ui.add_enabled(pv.index + 1 < paths.len(), egui::Button::new("Next ▶")).clicked() {
+                        step = 1;
+                    }
+                    ui.separator();
+                    if ui.add_enabled(pv.zoom > 0.34, egui::Button::new("verkleinern")).clicked() {
+                        pv.zoom = (pv.zoom * 0.8).max(0.333);
+                    }
+                    if ui.button("anpassen").clicked() {
+                        pv.zoom = 1.0;
+                    }
+                    if ui.add_enabled(pv.zoom < 2.99, egui::Button::new("vergrössern")).clicked() {
+                        pv.zoom = (pv.zoom * 1.25).min(3.0);
+                    }
+                    ui.weak(format!("{:.0}%", pv.zoom * 100.0));
+                });
+                ui.separator();
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui(VIEW, |ui| {
+                        egui::ScrollArea::both().id_salt(&rel).max_width(VIEW.x).max_height(VIEW.y).auto_shrink([false, false]).show(ui, |ui| {
+                            let Some((id, s)) = tex else {
+                                ui.spinner();
+                                return;
+                            };
+                            let fit = (VIEW.x / s.x).min(VIEW.y / s.y) * 0.99;
+                            let img = s * fit * pv.zoom;
+                            let (cell, resp) = ui.allocate_exact_size(img.max(VIEW), egui::Sense::hover());
+                            let rect = egui::Rect::from_center_size(cell.center(), img);
+                            if resp.hovered() {
+                                let (z, wheel) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
+                                let z = z * (wheel * 0.002).exp();
+                                if z != 1.0 {
+                                    pv.zoom = (pv.zoom * z).clamp(0.333, 3.0);
+                                }
+                                if wheel != 0.0 {
+                                    ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                                }
+                            }
+                            let painter = ui.painter_at(rect.intersect(ui.clip_rect()));
+                            painter.image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                            if let Some((_, black, white)) = &stats {
+                                if pv.black {
+                                    annotate(&painter, rect, *black, "Schwarz", egui::Color32::from_rgb(196, 30, 90));
+                                }
+                                if pv.white {
+                                    annotate(&painter, rect, *white, "Weiss", egui::Color32::from_rgb(93, 176, 218));
+                                }
+                            }
+                            if loading {
+                                ui.put(egui::Rect::from_min_size(ui.clip_rect().min + egui::vec2(8.0, 8.0), egui::vec2(20.0, 20.0)), egui::Spinner::new());
+                            }
+                        });
+                    });
+                    ui.vertical(|ui| {
+                        ui.set_width(SIDE);
+                        ui.set_min_height(VIEW.y);
+                        ui.label(egui::RichText::new(heading).strong());
+                        egui::Grid::new("film_info").num_columns(2).spacing([8.0, 2.0]).show(ui, |ui| {
+                            for (k, v) in &details {
+                                ui.weak(k);
+                                ui.add(egui::Label::new(v).wrap());
+                                ui.end_row();
+                            }
+                        });
+                        ui.add_space(8.0);
+                        match &stats {
+                            Some((h, _, _)) => histogram::paint(ui, h, egui::vec2(SIDE, 100.0)),
+                            None => {
+                                ui.allocate_space(egui::vec2(SIDE, 100.0));
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut pv.black, "Schwarz");
+                            ui.checkbox(&mut pv.white, "Weiss");
+                        });
+                        ui.add_space(8.0);
+                        ui.label("Tags");
+                        commit |= ui.add(egui::TextEdit::multiline(&mut pv.tags).desired_rows(3).desired_width(f32::INFINITY)).lost_focus();
+                        ui.add_space(4.0);
+                        ui.label("Ort");
+                        commit |= ui.add(egui::TextEdit::singleline(&mut pv.location).desired_width(f32::INFINITY)).lost_focus();
+                    });
+                });
+            });
+        if commit || step != 0 || close || !open {
+            self.commit_info(&rel, &pv.tags, &pv.location);
+        }
+        if close || !open {
+            return;
+        }
+        if step != 0 {
+            pv.index = (pv.index as i32 + step).clamp(0, paths.len() as i32 - 1) as usize;
+            pv.dir = step;
+            pv.zoom = 1.0;
+            ctx.request_repaint();
+        }
+        self.preview = Some(pv);
     }
 
     fn clear_filters(&mut self) {
@@ -501,7 +1033,7 @@ impl App {
         self.filters.resize(t.fields.len(), Default::default());
         egui::Grid::new("filter_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             for (i, f) in t.fields.iter().enumerate() {
-                if !f.visible_in_table || f.ty == FieldType::Id {
+                if !f.visible_in_table {
                     continue;
                 }
                 let (a, b) = &mut self.filters[i];
@@ -516,7 +1048,7 @@ impl App {
                             }
                         });
                     }
-                    FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => {
+                    FieldType::Id | FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => {
                         ui.add(egui::TextEdit::singleline(a).hint_text("from").desired_width(60.0));
                         ui.add(egui::TextEdit::singleline(b).hint_text("to").desired_width(60.0));
                     }
@@ -543,7 +1075,7 @@ impl App {
             let (a, b) = self.filters[i].clone();
             match f.ty {
                 FieldType::Enum | FieldType::Bool => self.query.equals.push((i, a)),
-                FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => self.query.ranges.push((i, a, b)),
+                FieldType::Id | FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => self.query.ranges.push((i, a, b)),
                 _ if !a.is_empty() => self.query.column_filters.push((i, a)),
                 _ => {}
             }
@@ -553,16 +1085,26 @@ impl App {
     fn table_view(&mut self, ui: &mut egui::Ui) {
         ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
         let t = self.engine.store.schema.tables[self.table].clone();
-        let ids = self.engine.view(&t.name, &self.query);
+        let ids = std::mem::take(&mut self.ids);
         let cols: Vec<usize> =
             (0..t.fields.len()).filter(|&i| t.fields[i].visible_in_table).collect();
         let mut open = None;
+        ui.style_mut().interaction.selectable_labels = false;
+        let table = self.table;
         let mut builder = TableBuilder::new(ui)
             .striped(true)
             .sense(egui::Sense::click())
             .max_scroll_height(f32::INFINITY);
-        for _ in &cols {
-            builder = builder.column(Column::auto().at_least(50.0).clip(true).resizable(true));
+        for (n, &i) in cols.iter().enumerate() {
+            let col = if n + 1 == cols.len() {
+                Column::remainder()
+            } else {
+                match self.col_widths.get(&(table, i)) {
+                    Some(&w) => Column::exact(w),
+                    None => Column::auto(),
+                }
+            };
+            builder = builder.column(col.at_least(50.0).clip(true).resizable(false));
         }
         builder
             .header(22.0, |mut h| {
@@ -580,14 +1122,29 @@ impl App {
                                 _ => Some((i, true)),
                             };
                         }
+                        // Resize handle on the right edge of the header cell only.
+                        let r = ui.max_rect();
+                        let grab = egui::Rect::from_x_y_ranges(r.right() - 3.0..=r.right() + 5.0, r.y_range());
+                        let resp = ui.interact(grab, ui.id().with("resize"), egui::Sense::click_and_drag());
+                        if resp.hovered() || resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                        }
+                        if resp.double_clicked() {
+                            self.col_widths.remove(&(table, i));
+                        }
+                        if resp.dragged() {
+                            let w = self.col_widths.get(&(table, i)).copied().unwrap_or(r.width());
+                            self.col_widths.insert((table, i), (w + resp.drag_delta().x).max(50.0));
+                        }
                     });
                 }
             })
             .body(|body| {
                 let td: &TableData = &self.engine.store.tables[self.table];
+                let by_id: std::collections::HashMap<u64, &fa_data::Row> = td.rows.iter().map(|r| (r.id, r)).collect();
                 body.rows(20.0, ids.len(), |mut row| {
                     let id = ids[row.index()];
-                    let Some(r) = td.rows.iter().find(|r| r.id == id) else { return };
+                    let Some(r) = by_id.get(&id) else { return };
                     row.set_selected(self.selected == Some(id));
                     for &i in &cols {
                         row.col(|ui| {
@@ -603,6 +1160,7 @@ impl App {
                     }
                 });
             });
+        self.ids = ids;
         if let Some(id) = open {
             self.open_form(Some(id));
         }
@@ -619,6 +1177,8 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let frame_start = std::time::Instant::now();
         if !self.styled {
             apply_theme(ctx);
             self.styled = true;
@@ -626,17 +1186,18 @@ impl eframe::App for App {
         self.poll();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.thumbs.poll(ctx);
+            self.thumbs.poll(ctx, &self.base_dir);
             let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|d| d.path.clone()).collect());
             if !dropped.is_empty() {
                 self.add_images(dropped);
             }
         }
-        let (undo, redo, save) = ctx.input(|i| {
+        let (undo, redo, save, print) = ctx.input(|i| {
             (
                 i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
                 i.modifiers.command && (i.key_pressed(egui::Key::Y) || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
                 i.modifiers.command && i.key_pressed(egui::Key::S),
+                i.modifiers.command && i.key_pressed(egui::Key::P),
             )
         });
         if self.form.is_none() {
@@ -644,6 +1205,10 @@ impl eframe::App for App {
             if redo { self.engine.redo(); }
         }
         if save { self.save(); }
+        if print { self.open_print(); }
+        // Filtered/sorted row ids, computed once per frame for the table and the toolbar.
+        let table_name = self.engine.store.schema.tables[self.table].name.clone();
+        self.ids = self.engine.view(&table_name, &self.query);
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -651,6 +1216,7 @@ impl eframe::App for App {
                     if ui.button("Open...").clicked() { self.open_files(ctx); ui.close_menu(); }
                     if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() { self.save(); ui.close_menu(); }
                     if ui.button("Download").clicked() { self.download(); ui.close_menu(); }
+                    if ui.add(egui::Button::new("Print...").shortcut_text("Ctrl+P")).clicked() { self.open_print(); ui.close_menu(); }
                     ui.separator();
                     if ui.button("Import CSV...").clicked() { self.import_csv(ctx); ui.close_menu(); }
                     #[cfg(not(target_arch = "wasm32"))]
@@ -699,13 +1265,12 @@ impl eframe::App for App {
                     self.show_filters = true;
                 }
                 let total = self.engine.store.tables[self.table].rows.len();
-                let name = self.engine.store.schema.tables[self.table].name.clone();
-                ui.weak(format!("{} of {total} rows", self.engine.view(&name, &self.query).len()));
+                ui.weak(format!("{} of {total} rows", self.ids.len()));
             });
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             let n = self.engine.store.tables[self.table].rows.len();
-            ui.label(format!("{n} rows{}  {}", if self.engine.dirty { "  (unsaved)" } else { "" }, self.status));
+            ui.label(format!("{n} rows{}  {}  ({:.0} ms/frame)", if self.engine.dirty { "  (unsaved)" } else { "" }, self.status, self.frame_ms));
         });
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             let mut pick = self.table;
@@ -727,11 +1292,7 @@ impl eframe::App for App {
             });
             ui.add_space(3.0);
             if pick != self.table {
-                self.table = pick;
-                self.query = Query::default();
-                self.filters.clear();
-                self.selected = None;
-                self.form = None;
+                self.switch_table(pick);
             }
         });
         #[cfg(not(target_arch = "wasm32"))]
@@ -743,6 +1304,7 @@ impl eframe::App for App {
             self.show_filters = open;
             self.sync_filters();
         }
+        self.print_dialog(ctx);
         egui::CentralPanel::default().show(ctx, |ui| self.table_view(ui));
         #[cfg(not(target_arch = "wasm32"))]
         self.preview_window(ctx);
@@ -751,6 +1313,8 @@ impl eframe::App for App {
 
         let mut commit = false;
         let mut cancel = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut choose = false;
         if let Some(form) = self.form.as_mut() {
             let t = self.engine.store.schema.tables[self.table].clone();
 
@@ -758,24 +1322,49 @@ impl eframe::App for App {
             egui::Window::new(format!("{title}: {}", t.label()))
                 .collapsible(false)
                 .show(ctx, |ui| {
+                    let mut input_right: Option<f32> = None;
                     egui::Grid::new("form").num_columns(2).show(ui, |ui| {
                         for (f, text) in t.fields.iter().zip(&mut form.texts) {
                             ui.label(f.label());
-                            ui.horizontal(|ui| Self::field_editor(ui, f, text));
+                            ui.horizontal_top(|ui| {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                if f.ty == FieldType::ImageRef {
+                                    choose |= image_ref_editor(ui, ctx, &mut self.thumbs, &self.base_dir, text);
+                                    return;
+                                }
+                                if let Some(r) = Self::field_editor(ui, f, text) {
+                                    input_right = Some(input_right.map_or(r, |x| x.max(r)));
+                                }
+                            });
                             ui.end_row();
                         }
                     });
                     for e in &form.errors {
                         ui.colored_label(egui::Color32::RED, e);
                     }
-                    ui.horizontal(|ui| {
+                    // Align OK with the right edge of the 300px inputs.
+                    let right = input_right.unwrap_or(ui.max_rect().right());
+                    let r = ui.available_rect_before_wrap();
+                    ui.allocate_ui_with_layout(egui::vec2((right - r.left()).max(0.0), ui.spacing().interact_size.y), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         commit = ui.button("OK").clicked();
                         cancel = ui.button("Cancel").clicked();
                     });
                 });
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) { cancel = true; }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if choose {
+                let film = self.engine.store.schema.tables.iter().position(|t| t.role == Some(TableRole::Film));
+                self.picker = film.map(|table| Picker { table, row: None });
+            }
+            self.picker_window(ctx);
+        }
         if commit { self.commit_form(); }
         if cancel { self.form = None; }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        }
     }
 }

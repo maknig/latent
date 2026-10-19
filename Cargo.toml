@@ -8,3 +8,10 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "wasmbind"] }
 csv = "1"
 thiserror = "1"
+
+# Image decoding and egui are far too slow unoptimised; keep our own code debuggable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
