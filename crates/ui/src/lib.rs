@@ -44,21 +44,46 @@ impl Preview {
     }
 }
 
-/// Qt-style marker: circle at `pos` (0..1 within `rect`), a line to a label placed 15% towards the image centre.
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(70, 130, 200);
+
+/// Marker: ring at `pos` (0..1 within `rect`) with a pill label beside it, on the side facing the image centre.
+/// `white` mirrors the colours: white ring for the black point, dark ring for the white point.
 #[cfg(not(target_arch = "wasm32"))]
-fn annotate(painter: &egui::Painter, rect: egui::Rect, pos: (f32, f32), label: &str, color: egui::Color32) {
+fn annotate(painter: &egui::Painter, rect: egui::Rect, pos: (f32, f32), label: &str, white: bool) {
+    const RING: f32 = 8.0;
+    const GAP: f32 = 6.0;
+    let ring = if white { egui::Color32::from_gray(20) } else { egui::Color32::WHITE };
+    let halo = if white { egui::Color32::from_white_alpha(150) } else { egui::Color32::from_black_alpha(150) };
     let p = rect.min + egui::vec2(pos.0 * rect.width(), pos.1 * rect.height());
-    let dx = rect.width() * 0.15 * if pos.0 < 0.5 { 1.0 } else { -1.0 };
-    let dy = rect.height() * 0.15 * if pos.1 < 0.5 { 1.0 } else { -1.0 };
-    let tp = p + egui::vec2(dx, dy);
-    painter.line_segment([p, tp], egui::Stroke::new(2.0_f32, color));
-    painter.circle_stroke(p, 10.0, egui::Stroke::new(2.0_f32, color));
-    let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(14.0), egui::Color32::WHITE);
-    let box_rect = egui::Rect::from_min_size(tp, galley.size() + egui::vec2(10.0, 6.0));
-    painter.rect_filled(box_rect, 2.0, color);
-    painter.galley(tp + egui::vec2(5.0, 3.0), galley, egui::Color32::WHITE);
+    painter.circle_stroke(p, RING, egui::Stroke::new(4.0_f32, halo));
+    painter.circle_stroke(p, RING, egui::Stroke::new(2.0_f32, ring));
+    let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+    let size = galley.size() + egui::vec2(26.0, 8.0);
+    let x = if pos.0 < 0.5 { p.x + RING + GAP } else { p.x - RING - GAP - size.x };
+    let inner = rect.shrink(4.0);
+    let y = (p.y - size.y / 2.0).clamp(inner.top(), (inner.bottom() - size.y).max(inner.top()));
+    let pill = egui::Rect::from_min_size(egui::pos2(x, y), size);
+    painter.rect_filled(pill, 4.0, egui::Color32::from_black_alpha(200));
+    painter.rect_stroke(pill, 4.0, egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(60)), egui::StrokeKind::Inside);
+    let dot_pos = pill.left_center() + egui::vec2(10.0, 0.0);
+    painter.circle_filled(dot_pos, 3.5, if white { egui::Color32::WHITE } else { egui::Color32::BLACK });
+    if !white {
+        painter.circle_stroke(dot_pos, 3.5, egui::Stroke::new(1.0_f32, egui::Color32::WHITE));
+    }
+    painter.galley(pill.left_top() + egui::vec2(18.0, 4.0), galley, egui::Color32::WHITE);
 }
 
+
+/// Small dark pill with `text`, its top-left (or top-right if `right`) corner at `corner`, inset by 4px.
+fn overlay_pill(painter: &egui::Painter, corner: egui::Pos2, right: bool, text: &str) {
+    let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+    let size = galley.size() + egui::vec2(16.0, 6.0);
+    let x = if right { corner.x - 4.0 - size.x } else { corner.x + 4.0 };
+    let pill = egui::Rect::from_min_size(egui::pos2(x, corner.y + 4.0), size);
+    painter.rect_filled(pill, 4.0, egui::Color32::from_black_alpha(200));
+    painter.rect_stroke(pill, 4.0, egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(60)), egui::StrokeKind::Inside);
+    painter.galley(pill.left_top() + egui::vec2(8.0, 3.0), galley, egui::Color32::WHITE);
+}
 
 enum Msg {
     Csv(String),
@@ -82,13 +107,12 @@ fn spawn(fut: impl std::future::Future<Output = ()> + Send + 'static) {
 }
 
 fn apply_theme(ctx: &egui::Context) {
-    let accent = egui::Color32::from_rgb(70, 130, 200);
     let mut v = egui::Visuals::dark();
     v.panel_fill = egui::Color32::from_gray(30);
     v.window_fill = egui::Color32::from_gray(36);
     v.extreme_bg_color = egui::Color32::from_gray(22);
     v.faint_bg_color = egui::Color32::from_gray(36);
-    v.selection.bg_fill = accent;
+    v.selection.bg_fill = ACCENT;
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(48));
     v.widgets.hovered.bg_fill = egui::Color32::from_gray(55);
     v.striped = true;
@@ -459,6 +483,17 @@ impl App {
         };
     }
 
+    /// Save pending changes, then close the window; stays open if saving fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn quit(&mut self, ctx: &egui::Context) {
+        if self.engine.dirty {
+            self.save();
+        }
+        if !self.engine.dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     fn field_editor(ui: &mut egui::Ui, f: &Field, text: &mut String) -> Option<f32> {
         let mut right = None;
         match f.ty {
@@ -608,19 +643,14 @@ impl App {
                         let full = self.resolve(p);
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(size * 1.3, size), egui::Sense::click());
                         if ui.is_rect_visible(rect) {
-                            self.thumbs.paint(ui, ctx, &full, rect, 320);
+                            self.thumbs.paint_cropped(ui, ctx, &full, rect, 320);
                         }
                         let is_source = n < skip;
                         if is_source {
-                            let tag = egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 4.0), egui::vec2(64.0, 16.0));
-                            ui.painter().rect_filled(tag, 8.0, egui::Color32::BLACK);
-                            ui.painter().rect_stroke(tag, 8.0, egui::Stroke::new(1.0_f32, egui::Color32::WHITE), egui::StrokeKind::Inside);
-                            ui.painter().text(tag.center(), egui::Align2::CENTER_CENTER, "Negativ", egui::FontId::proportional(12.0), egui::Color32::WHITE);
+                            overlay_pill(ui.painter(), rect.left_top(), false, "Negativ");
                         }
                         if counts[n] > 0 {
-                            let badge = egui::Rect::from_min_size(rect.right_top() + egui::vec2(-26.0, 4.0), egui::vec2(22.0, 16.0));
-                            ui.painter().rect_filled(badge, 8.0, egui::Color32::from_rgb(70, 130, 200));
-                            ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, counts[n].to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+                            overlay_pill(ui.painter(), rect.right_top(), true, &counts[n].to_string());
                         }
                         if resp.double_clicked() {
                             self.preview = self.selected.map(|row| Preview::new(self.table, row, n));
@@ -950,7 +980,7 @@ impl App {
                             };
                             let fit = (VIEW.x / s.x).min(VIEW.y / s.y) * 0.99;
                             let img = s * fit * pv.zoom;
-                            let (cell, resp) = ui.allocate_exact_size(img.max(VIEW), egui::Sense::hover());
+                            let (cell, resp) = ui.allocate_exact_size(img.max(VIEW), egui::Sense::click());
                             let rect = egui::Rect::from_center_size(cell.center(), img);
                             if resp.hovered() {
                                 let (z, wheel) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
@@ -962,14 +992,17 @@ impl App {
                                     ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
                                 }
                             }
+                            if resp.double_clicked() {
+                                pv.zoom = 1.0;
+                            }
                             let painter = ui.painter_at(rect.intersect(ui.clip_rect()));
                             painter.image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                             if let Some((_, black, white)) = &stats {
                                 if pv.black {
-                                    annotate(&painter, rect, *black, "Schwarz", egui::Color32::from_rgb(196, 30, 90));
+                                    annotate(&painter, rect, *black, "Schwarz", false);
                                 }
                                 if pv.white {
-                                    annotate(&painter, rect, *white, "Weiss", egui::Color32::from_rgb(93, 176, 218));
+                                    annotate(&painter, rect, *white, "Weiss", true);
                                 }
                             }
                             if loading {
@@ -1205,6 +1238,10 @@ impl eframe::App for App {
             if redo { self.engine.redo(); }
         }
         if save { self.save(); }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) {
+            self.quit(ctx);
+        }
         if print { self.open_print(); }
         // Filtered/sorted row ids, computed once per frame for the table and the toolbar.
         let table_name = self.engine.store.schema.tables[self.table].name.clone();
@@ -1235,6 +1272,14 @@ impl eframe::App for App {
                         self.engine.dirty = true;
                         self.status = "Orphans purged".into();
                         ui.close_menu();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        if ui.add(egui::Button::new("Quit").shortcut_text("Ctrl+Q")).clicked() {
+                            self.quit(ctx);
+                            ui.close_menu();
+                        }
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -1272,25 +1317,29 @@ impl eframe::App for App {
             let n = self.engine.store.tables[self.table].rows.len();
             ui.label(format!("{n} rows{}  {}  ({:.0} ms/frame)", if self.engine.dirty { "  (unsaved)" } else { "" }, self.status, self.frame_ms));
         });
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+        let tab_frame = egui::Frame::new().fill(egui::Color32::from_gray(22)).inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 0 });
+        egui::TopBottomPanel::top("tabs").frame(tab_frame).show(ctx, |ui| {
             let mut pick = self.table;
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 18.0;
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for (i, t) in self.engine.store.schema.tables.iter().enumerate() {
                     let active = i == self.table;
-                    let color = if active { egui::Color32::WHITE } else { egui::Color32::from_gray(140) };
-                    let resp = ui.add(egui::Label::new(egui::RichText::new(t.label()).size(15.0).color(color)).sense(egui::Sense::click()));
+                    let galley = ui.painter().layout_no_wrap(t.label().to_string(), egui::FontId::proportional(15.0), egui::Color32::WHITE);
+                    let (rect, resp) = ui.allocate_exact_size(galley.size() + egui::vec2(28.0, 12.0), egui::Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active {
-                        let r = resp.rect;
-                        ui.painter().line_segment([egui::pos2(r.left(), r.bottom() + 3.0), egui::pos2(r.right(), r.bottom() + 3.0)], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(70, 130, 200)));
+                    let (fill, color) = if active {
+                        (egui::Color32::from_gray(52), egui::Color32::WHITE)
                     } else if resp.hovered() {
-                        ui.painter().line_segment([egui::pos2(resp.rect.left(), resp.rect.bottom() + 3.0), egui::pos2(resp.rect.right(), resp.rect.bottom() + 3.0)], egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)));
-                    }
+                        (egui::Color32::from_gray(38), egui::Color32::from_gray(200))
+                    } else {
+                        (egui::Color32::from_gray(26), egui::Color32::from_gray(140))
+                    };
+                    let top = egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
+                    ui.painter().rect_filled(rect, top, fill);
+                    ui.painter().galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, color);
                     if resp.clicked() { pick = i; }
                 }
             });
-            ui.add_space(3.0);
             if pick != self.table {
                 self.switch_table(pick);
             }

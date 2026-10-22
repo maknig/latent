@@ -16,7 +16,7 @@
     in {
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
-          rust trunk wasm-bindgen-cli pkg-config
+          rust trunk wasm-bindgen-cli pkg-config openssl
           libxkbcommon libGL wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
           gtk3 glib
         ];

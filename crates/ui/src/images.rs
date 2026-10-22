@@ -243,15 +243,35 @@ impl Thumbs {
     }
 }
 
+/// UV rectangle showing the centered part of a `tex`-sized image that fills a `view`-sized rect.
+fn crop_uv(tex: egui::Vec2, view: egui::Vec2) -> egui::Rect {
+    let scale = (view.x / tex.x).max(view.y / tex.y);
+    let (fx, fy) = (view.x / (tex.x * scale), view.y / (tex.y * scale));
+    egui::Rect::from_min_max(egui::pos2((1.0 - fx) / 2.0, (1.0 - fy) / 2.0), egui::pos2((1.0 + fx) / 2.0, (1.0 + fy) / 2.0))
+}
+
 impl Thumbs {
     /// Paint the thumbnail of `path` fitted into `rect`; spinner while loading, "missing" if unreadable.
     pub fn paint(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, rect: egui::Rect, size: u32) {
+        self.paint_with(ui, ctx, path, rect, size, false);
+    }
+
+    /// Like `paint`, but fills `rect` completely with a center crop.
+    pub fn paint_cropped(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, rect: egui::Rect, size: u32) {
+        self.paint_with(ui, ctx, path, rect, size, true);
+    }
+
+    fn paint_with(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, rect: egui::Rect, size: u32, crop: bool) {
         match self.get(ctx, path, size) {
             Thumb::Ready(tex) => {
                 let s = tex.size_vec2();
-                let scale = (rect.width() / s.x).min(rect.height() / s.y);
-                let r = egui::Rect::from_center_size(rect.center(), s * scale);
-                ui.painter().image(tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                if crop {
+                    ui.painter().image(tex.id(), rect, crop_uv(s, rect.size()), egui::Color32::WHITE);
+                } else {
+                    let scale = (rect.width() / s.x).min(rect.height() / s.y);
+                    let r = egui::Rect::from_center_size(rect.center(), s * scale);
+                    ui.painter().image(tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                }
             }
             Thumb::Loading => {
                 ui.put(rect, egui::Spinner::new());
@@ -267,6 +287,18 @@ impl Thumbs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_uv_centers() {
+        // portrait image into a landscape view: full width, middle slice of the height
+        let r = crop_uv(egui::vec2(100.0, 200.0), egui::vec2(130.0, 100.0));
+        assert!((r.min.x - 0.0).abs() < 1e-6 && (r.max.x - 1.0).abs() < 1e-6);
+        assert!((r.center().y - 0.5).abs() < 1e-6 && r.height() < 1.0);
+        // landscape image: full height, middle slice of the width
+        let r = crop_uv(egui::vec2(300.0, 100.0), egui::vec2(130.0, 100.0));
+        assert!((r.min.y - 0.0).abs() < 1e-6 && (r.max.y - 1.0).abs() < 1e-6);
+        assert!((r.center().x - 0.5).abs() < 1e-6 && r.width() < 1.0);
+    }
 
     #[test]
     fn cache_file_follows_file_changes() {
