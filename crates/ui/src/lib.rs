@@ -1015,9 +1015,11 @@ impl App {
         // Minimum height of the side column, and the margin below it that the image area adds.
         const SIDE_MIN: f32 = 520.0;
         const MARGIN: f32 = 6.0;
-        // Square image area: as tall as the side column was in the last frame (tag chips included) plus a small margin.
+        /// Width of the image area relative to its height, so landscape photos fill it better.
+        const LANDSCAPE: f32 = 1.3;
+        // Image area (width = LANDSCAPE x height): as tall as the side column was in the last frame (tag chips included) plus a small margin.
         let edge = (pv.side_h.max(SIDE_MIN) + MARGIN).min((ctx.screen_rect().height() - 120.0).max(SIDE_MIN));
-        let view = egui::vec2(edge, edge);
+        let view = egui::vec2(edge * LANDSCAPE, edge);
         self.tagger.poll();
         let chips: Vec<(String, f32)> = match &self.tagger.result {
             Some((q, r)) if *q == rel => {
@@ -1122,8 +1124,8 @@ impl App {
                         ui.label("Tags");
                         commit |= ui.add(egui::TextEdit::multiline(&mut pv.tags).desired_rows(3).desired_width(f32::INFINITY)).lost_focus();
                         let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                        // Fixed height of four rows (scrolls if more): the column must not change size when suggestions appear.
-                        let area_h = 4.0 * row_h;
+                        // Fixed height of five rows: the button plus eight chips (about two per row) fit (scrolls if more): the column must not change size when suggestions appear.
+                        let area_h = 5.0 * row_h;
                         egui::ScrollArea::vertical().id_salt("tag_chips").min_scrolled_height(area_h).max_height(area_h).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 if ui.add_enabled(!running, egui::Button::new(if running { "Auto tags ..." } else { "Auto tags" })).clicked() {
