@@ -266,6 +266,22 @@ impl App {
         }
     }
 
+    /// Image view for `path`: the first row (film tables come first) whose strip contains it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn locate_image(&self, path: &str) -> Option<Preview> {
+        for (ti, t) in self.engine.store.schema.tables.iter().enumerate() {
+            if t.images_index().is_none() {
+                continue;
+            }
+            for r in &self.engine.store.tables[ti].rows {
+                if let Some(n) = self.row_image_paths(ti, r.id).iter().position(|p| p == path) {
+                    return Some(Preview::new(ti, r.id, n));
+                }
+            }
+        }
+        None
+    }
+
     /// Show the enlargement table filtered to the rows made from `path`.
     #[cfg(not(target_arch = "wasm32"))]
     fn show_enlargements(&mut self, path: String) {
@@ -1390,7 +1406,12 @@ impl eframe::App for App {
         #[cfg(not(target_arch = "wasm32"))]
         self.unused_dialog(ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        self.similar.show(ctx, &mut self.thumbs, &self.base_dir);
+        if let Some(p) = self.similar.show(ctx, &mut self.thumbs, &self.base_dir) {
+            match self.locate_image(&p) {
+                Some(pv) => self.preview = Some(pv),
+                None => self.status = "Image not in any row".into(),
+            }
+        }
 
         let mut commit = false;
         let mut cancel = false;

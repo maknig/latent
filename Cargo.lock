@@ -1260,6 +1260,7 @@ dependencies = [
  "fa-data",
  "fa-engine",
  "fa-schema",
+ "fa-vision",
  "image",
  "pollster",
  "rfd",

@@ -6,7 +6,9 @@ use fa_vision::{EmbeddingCache, Model, OnnxModel};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-const TOP: usize = 12;
+const TOP: usize = 14;
+const PER_ROW: usize = 5;
+const TILE: (f32, f32) = (150.0, 110.0);
 
 enum Msg {
     Progress(usize, usize),
@@ -110,8 +112,9 @@ impl Similar {
         });
     }
 
-    /// Applies finished work and draws the result window.
-    pub fn show(&mut self, ctx: &egui::Context, thumbs: &mut Thumbs, base: &Path) {
+    /// Applies finished work and draws the result window. Returns the path of a clicked tile.
+    pub fn show(&mut self, ctx: &egui::Context, thumbs: &mut Thumbs, base: &Path) -> Option<String> {
+        let mut clicked = None;
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Progress(d, t) => self.progress = Some((d, t)),
@@ -127,19 +130,31 @@ impl Similar {
         }
         let mut open = true;
         if let Some((query, matches)) = &self.result {
-            egui::Window::new("Similar images").open(&mut open).default_width(640.0).show(ctx, |ui| {
+            egui::Window::new("Similar images").open(&mut open).resizable(false).show(ctx, |ui| {
                 ui.label(format!("Closest to {query}"));
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for (p, score) in std::iter::once(&(query.clone(), 1.0)).chain(matches.iter()) {
-                            ui.vertical(|ui| {
-                                let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 110.0), egui::Sense::hover());
-                                thumbs.paint_cropped(ui, ctx, &base.join(p), rect, 320);
-                                resp.on_hover_text(p);
-                                ui.weak(format!("{score:.2}"));
-                            });
-                        }
-                    });
+                    let tiles: Vec<(&String, Option<f32>)> = std::iter::once((query, None)).chain(matches.iter().map(|(p, s)| (p, Some(*s)))).collect();
+                    for row in tiles.chunks(PER_ROW) {
+                        ui.horizontal(|ui| {
+                            for (p, score) in row {
+                                ui.vertical(|ui| {
+                                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE.0, TILE.1), egui::Sense::click());
+                                    thumbs.paint_cropped(ui, ctx, &base.join(p), rect, 320);
+                                    let resp = resp.on_hover_text(p.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if resp.hovered() {
+                                        ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(70, 130, 200)), egui::StrokeKind::Inside);
+                                    }
+                                    if resp.clicked() {
+                                        clicked = Some((*p).clone());
+                                    }
+                                    match score {
+                                        Some(s) => ui.weak(format!("{s:.2}")),
+                                        None => ui.weak("Query"),
+                                    };
+                                });
+                            }
+                        });
+                    }
                 });
             });
         }
@@ -154,5 +169,6 @@ impl Similar {
                 }
             });
         }
+        clicked
     }
 }

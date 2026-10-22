@@ -18,6 +18,9 @@ pub struct Manifest {
     /// Output tensor name; first output if absent.
     #[serde(default)]
     pub output: Option<String>,
+    /// For token outputs `[1, tokens, dim]`: `"cls"` (first token) or `"mean"`; otherwise the output is used as is.
+    #[serde(default)]
+    pub pool: Option<String>,
 }
 
 fn half() -> [f32; 3] {
@@ -78,7 +81,21 @@ impl Model for OnnxModel {
             Some(name) => &outputs[name.as_str()],
             None => &outputs[0],
         };
-        let (_, values) = out.try_extract_tensor::<f32>().map_err(err)?;
-        Ok(values.to_vec())
+        let (shape, values) = out.try_extract_tensor::<f32>().map_err(err)?;
+        match (m.pool.as_deref(), shape.len()) {
+            (Some(mode), 3) => {
+                let dim = shape[2] as usize;
+                Ok(match mode {
+                    "cls" => values[..dim].to_vec(),
+                    "mean" => {
+                        let tokens = values.len() / dim;
+                        (0..dim).map(|d| (0..tokens).map(|t| values[t * dim + d]).sum::<f32>() / tokens as f32).collect()
+                    }
+                    other => return Err(VisionError::Model(format!("unknown pool mode {other}"))),
+                })
+            }
+            (Some(_), n) => Err(VisionError::Model(format!("pool needs a 3-d output, got {n}-d"))),
+            (None, _) => Ok(values.to_vec()),
+        }
     }
 }
