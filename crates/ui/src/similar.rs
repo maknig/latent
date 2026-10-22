@@ -8,7 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 const TOP: usize = 15;
 const PER_ROW: usize = 5;
-const TILE: (f32, f32) = (150.0, 110.0);
+const TILE: (f32, f32) = (150.0, 190.0);
 
 enum Msg {
     Progress(usize, usize),
