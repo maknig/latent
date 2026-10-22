@@ -135,8 +135,12 @@ impl Similar {
         }
         let mut open = true;
         if let Some((query, matches)) = &self.result {
-            egui::Window::new("Similar images").open(&mut open).resizable(true).default_size([800.0, 700.0]).show(ctx, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Window::new("Similar images").open(&mut open).resizable(false).show(ctx, |ui| {
+                // A scroll area in an auto-sized window shrinks to one line unless told its content size.
+                let sp = ui.spacing().item_spacing;
+                let rows = matches.len().div_ceil(PER_ROW).max(1) as f32;
+                let want = rows * (TILE.1 + 22.0 + 2.0 * sp.y) + 24.0;
+                egui::ScrollArea::vertical().min_scrolled_width(PER_ROW as f32 * (TILE.0 + sp.x)).min_scrolled_height(want.min(ctx.screen_rect().height() - 120.0)).show(ui, |ui| {
                     ui.label(format!("Closest to {}", film_label(query).unwrap_or_else(|| query.clone())));
                     let tiles: Vec<(&String, f32)> = matches.iter().map(|(p, s)| (p, *s)).collect();
                     for row in tiles.chunks(PER_ROW) {
