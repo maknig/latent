@@ -6,11 +6,12 @@ pub fn split_tags(s: &str) -> Vec<String> {
 }
 
 /// Tags for `query` voted by its `k` most similar tagged images: a tag's score is the share of the
-/// neighbours' summed similarity that carries it (0..1). Sorted by score, best first.
-pub fn suggest_from_neighbours(query: &[f32], tagged: &[(Vec<f32>, Vec<String>)], k: usize) -> Vec<(String, f32)> {
-    let mut near: Vec<(f32, &Vec<String>)> = tagged.iter().map(|(v, t)| (cosine(query, v).max(0.0), t)).collect();
+/// neighbours (cosine >= `min_sim`) carrying it, times the best similarity. Sorted by score, best first.
+pub fn suggest_from_neighbours(query: &[f32], tagged: &[(Vec<f32>, Vec<String>)], k: usize, min_sim: f32) -> Vec<(String, f32)> {
+    let mut near: Vec<(f32, &Vec<String>)> = tagged.iter().map(|(v, t)| (cosine(query, v), t)).filter(|n| n.0 >= min_sim).collect();
     near.sort_by(|a, b| b.0.total_cmp(&a.0));
     near.truncate(k);
+    let top = near.first().map_or(0.0, |n| n.0);
     let total: f32 = near.iter().map(|n| n.0).sum();
     if total <= 0.0 {
         return vec![];
@@ -25,7 +26,7 @@ pub fn suggest_from_neighbours(query: &[f32], tagged: &[(Vec<f32>, Vec<String>)]
             }
         }
     }
-    let mut out: Vec<(String, f32)> = votes.into_iter().map(|(t, s)| (t, s / total)).collect();
+    let mut out: Vec<(String, f32)> = votes.into_iter().map(|(t, s)| (t, s / total * top)).collect();
     out.sort_by(|a, b| b.1.total_cmp(&a.1));
     out
 }
@@ -62,7 +63,7 @@ mod tests {
             (vec![0.9, 0.1], tags(&["berge", "Winter"])),
             (vec![0.0, 1.0], tags(&["Portrait"])),
         ];
-        let r = suggest_from_neighbours(&[1.0, 0.0], &tagged, 2);
+        let r = suggest_from_neighbours(&[1.0, 0.0], &tagged, 2, 0.5);
         assert_eq!(r[0].0, "Berge");
         assert!((r[0].1 - 1.0).abs() < 1e-6);
         assert!(r.iter().all(|(t, _)| t != "Portrait"));
@@ -80,6 +81,6 @@ mod tests {
 
     #[test]
     fn nothing_tagged_nothing_suggested() {
-        assert!(suggest_from_neighbours(&[1.0], &[], 5).is_empty());
+        assert!(suggest_from_neighbours(&[1.0], &[], 5, 0.5).is_empty());
     }
 }

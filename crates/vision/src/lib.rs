@@ -1,10 +1,12 @@
 //! Pluggable vision models: image -> feature vector, plus plain-Rust similarity and clustering.
 
+mod autotag;
 mod cache;
 mod cluster;
 mod onnx;
 mod tags;
 
+pub use autotag::{find_kind, suggest as suggest_tags, DEFAULT_TAGS};
 pub use cache::EmbeddingCache;
 pub use cluster::{cluster, cosine, most_similar};
 pub use onnx::{kind_of, Manifest, OnnxModel, TextModel};

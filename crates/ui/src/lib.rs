@@ -1015,11 +1015,12 @@ impl App {
         let chips: Vec<(String, f32)> = match &self.tagger.result {
             Some((q, r)) if *q == rel => {
                 let have: Vec<String> = fa_vision::split_tags(&pv.tags).iter().map(|t| t.to_lowercase()).collect();
-                r.iter().filter(|(t, s)| *s >= 0.2 && !have.contains(&t.to_lowercase())).take(8).cloned().collect()
+                r.iter().filter(|(t, _)| !have.contains(&t.to_lowercase())).take(8).cloned().collect()
             }
             _ => vec![],
         };
         let (running, tag_error) = (self.tagger.running, self.tagger.error.clone());
+        let searched = matches!(&self.tagger.result, Some((q, _)) if *q == rel);
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
         let (mut open, mut commit) = (true, false);
         egui::Window::new(full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
@@ -1123,6 +1124,9 @@ impl App {
                                 }
                             }
                         });
+                        if searched && chips.is_empty() && !running {
+                            ui.weak("No new suggestions");
+                        }
                         if let Some(e) = &tag_error {
                             ui.colored_label(egui::Color32::LIGHT_RED, e);
                         }

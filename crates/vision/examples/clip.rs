@@ -7,7 +7,11 @@ fn main() {
     let dir = PathBuf::from(&a[0]);
     let img = OnnxModel::load(&dir.join("clip-image.onnx")).unwrap();
     let txt = TextModel::load(&dir.join("clip-text.onnx")).unwrap();
-    let q = img.run(&image::open(&a[1]).unwrap()).unwrap();
+    let mut im = image::open(&a[1]).unwrap();
+    if std::env::var("INVERT").is_ok() {
+        im.invert();
+    }
+    let q = img.run(&im).unwrap();
     let texts: Vec<(String, Vec<f32>)> = a[2..].iter().map(|t| (t.clone(), txt.embed(&format!("a photo of {t}")).unwrap())).collect();
     println!("dims {} {}", q.len(), texts[0].1.len());
     for (t, s) in score_tags(&q, &texts, 100.0) {
