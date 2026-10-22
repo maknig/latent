@@ -1012,11 +1012,11 @@ impl App {
             })
             .unwrap_or_default();
         const SIDE: f32 = 256.0;
-        // Smallest edge of the square image area, and the side column's minimum height.
-        const VIEW_MIN: f32 = 720.0;
+        // Minimum height of the side column, and the margin below it that the image area adds.
         const SIDE_MIN: f32 = 520.0;
-        // Square image area: as tall as the side column was in the last frame (tag chips included), at least VIEW_MIN.
-        let edge = pv.side_h.max(VIEW_MIN).min((ctx.screen_rect().height() - 120.0).max(SIDE_MIN));
+        const MARGIN: f32 = 6.0;
+        // Square image area: as tall as the side column was in the last frame (tag chips included) plus a small margin.
+        let edge = (pv.side_h.max(SIDE_MIN) + MARGIN).min((ctx.screen_rect().height() - 120.0).max(SIDE_MIN));
         let view = egui::vec2(edge, edge);
         self.tagger.poll();
         let chips: Vec<(String, f32)> = match &self.tagger.result {
