@@ -6,7 +6,7 @@ use fa_vision::{EmbeddingCache, Model, OnnxModel};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-const TOP: usize = 14;
+const TOP: usize = 15;
 const PER_ROW: usize = 5;
 const TILE: (f32, f32) = (150.0, 110.0);
 
@@ -31,6 +31,11 @@ impl Default for Similar {
         let (tx, rx) = channel();
         Similar { tx, rx, progress: None, result: None, error: None }
     }
+}
+
+/// "#<film nr>" from an archive path `images/<table>/<id>/<file>`.
+fn film_label(path: &str) -> Option<String> {
+    fa_data::film_row_for(path).map(|(_, id)| format!("#{id}"))
 }
 
 fn mtime(p: &Path) -> u64 {
@@ -131,9 +136,9 @@ impl Similar {
         let mut open = true;
         if let Some((query, matches)) = &self.result {
             egui::Window::new("Similar images").open(&mut open).resizable(false).show(ctx, |ui| {
-                ui.label(format!("Closest to {query}"));
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let tiles: Vec<(&String, Option<f32>)> = std::iter::once((query, None)).chain(matches.iter().map(|(p, s)| (p, Some(*s)))).collect();
+                    ui.label(format!("Closest to {}", film_label(query).unwrap_or_else(|| query.clone())));
+                    let tiles: Vec<(&String, f32)> = matches.iter().map(|(p, s)| (p, *s)).collect();
                     for row in tiles.chunks(PER_ROW) {
                         ui.horizontal(|ui| {
                             for (p, score) in row {
@@ -142,15 +147,15 @@ impl Similar {
                                     thumbs.paint_cropped(ui, ctx, &base.join(p), rect, 320);
                                     let resp = resp.on_hover_text(p.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     if resp.hovered() {
-                                        ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(70, 130, 200)), egui::StrokeKind::Inside);
+                                        ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(70, 130, 200)), egui::StrokeKind::Inside);
                                     }
                                     if resp.clicked() {
                                         clicked = Some((*p).clone());
                                     }
-                                    match score {
-                                        Some(s) => ui.weak(format!("{s:.2}")),
-                                        None => ui.weak("Query"),
-                                    };
+                                    ui.weak(match film_label(p) {
+                                        Some(f) => format!("{f} · {score:.2}"),
+                                        None => format!("{score:.2}"),
+                                    });
                                 });
                             }
                         });
