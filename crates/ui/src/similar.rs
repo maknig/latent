@@ -8,7 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 const TOP: usize = 15;
 const PER_ROW: usize = 5;
-const TILE: (f32, f32) = (150.0, 190.0);
+const TILE: (f32, f32) = (150.0, 110.0);
 
 enum Msg {
     Progress(usize, usize),
@@ -135,8 +135,8 @@ impl Similar {
         }
         let mut open = true;
         if let Some((query, matches)) = &self.result {
-            egui::Window::new("Similar images").open(&mut open).resizable(false).show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Window::new("Similar images").open(&mut open).resizable(true).default_size([800.0, 700.0]).show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.label(format!("Closest to {}", film_label(query).unwrap_or_else(|| query.clone())));
                     let tiles: Vec<(&String, f32)> = matches.iter().map(|(p, s)| (p, *s)).collect();
                     for row in tiles.chunks(PER_ROW) {
