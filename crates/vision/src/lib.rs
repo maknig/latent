@@ -3,10 +3,12 @@
 mod cache;
 mod cluster;
 mod onnx;
+mod tags;
 
 pub use cache::EmbeddingCache;
 pub use cluster::{cluster, cosine, most_similar};
 pub use onnx::{Manifest, OnnxModel};
+pub use tags::{split_tags, suggest_from_neighbours};
 
 use image::DynamicImage;
 

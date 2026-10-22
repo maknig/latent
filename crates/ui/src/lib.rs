@@ -14,6 +14,8 @@ mod print;
 mod images;
 #[cfg(not(target_arch = "wasm32"))]
 mod similar;
+#[cfg(not(target_arch = "wasm32"))]
+mod tagger;
 
 /// Decoded preview texture plus its histogram and black/white points.
 #[cfg(not(target_arch = "wasm32"))]
@@ -190,6 +192,8 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     similar: similar::Similar,
     #[cfg(not(target_arch = "wasm32"))]
+    tagger: tagger::Tagger,
+    #[cfg(not(target_arch = "wasm32"))]
     preview: Option<Preview>,
     #[cfg(not(target_arch = "wasm32"))]
     picker: Option<Picker>,
@@ -224,6 +228,8 @@ impl App {
             thumbs: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             similar: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            tagger: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             preview: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -886,6 +892,22 @@ impl App {
         self.row_image_paths(self.table, id).len() - self.selected_paths().len()
     }
 
+    /// Images that have tags, with their tags.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tagged_images(&self) -> Vec<(String, Vec<String>)> {
+        let store = &self.engine.store;
+        let Some(ti) = store.schema.role_index(TableRole::ImageInfo) else { return vec![] };
+        let t = &store.schema.tables[ti];
+        let (Some(rf), Some(tg)) = (t.image_ref_index(), t.field_index("tags")) else { return vec![] };
+        let text = |v: &Value| if let Value::Text(s) = v { s.clone() } else { String::new() };
+        store.tables[ti]
+            .rows
+            .iter()
+            .map(|r| (text(&r.values[rf]), fa_vision::split_tags(&text(&r.values[tg]))))
+            .filter(|(p, t)| !p.is_empty() && !t.is_empty())
+            .collect()
+    }
+
     /// (tags, location) stored for the image `rel`.
     #[cfg(not(target_arch = "wasm32"))]
     fn image_info(&self, rel: &str) -> (String, String) {
@@ -989,6 +1011,16 @@ impl App {
             .unwrap_or_default();
         const SIDE: f32 = 256.0;
         const VIEW: egui::Vec2 = egui::vec2(640.0, 520.0);
+        self.tagger.poll();
+        let chips: Vec<(String, f32)> = match &self.tagger.result {
+            Some((q, r)) if *q == rel => {
+                let have: Vec<String> = fa_vision::split_tags(&pv.tags).iter().map(|t| t.to_lowercase()).collect();
+                r.iter().filter(|(t, s)| *s >= 0.2 && !have.contains(&t.to_lowercase())).take(8).cloned().collect()
+            }
+            _ => vec![],
+        };
+        let (running, tag_error) = (self.tagger.running, self.tagger.error.clone());
+        let (mut auto_tags, mut add_tag) = (false, None::<String>);
         let (mut open, mut commit) = (true, false);
         egui::Window::new(full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
             .id(egui::Id::new("image_preview_v2"))
@@ -1081,12 +1113,34 @@ impl App {
                         ui.add_space(8.0);
                         ui.label("Tags");
                         commit |= ui.add(egui::TextEdit::multiline(&mut pv.tags).desired_rows(3).desired_width(f32::INFINITY)).lost_focus();
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.add_enabled(!running, egui::Button::new(if running { "Auto tags ..." } else { "Auto tags" })).clicked() {
+                                auto_tags = true;
+                            }
+                            for (t, s) in &chips {
+                                if ui.button(format!("{t} {s:.2}")).on_hover_text("Add tag").clicked() {
+                                    add_tag = Some(t.clone());
+                                }
+                            }
+                        });
+                        if let Some(e) = &tag_error {
+                            ui.colored_label(egui::Color32::LIGHT_RED, e);
+                        }
                         ui.add_space(4.0);
                         ui.label("Ort");
                         commit |= ui.add(egui::TextEdit::singleline(&mut pv.location).desired_width(f32::INFINITY)).lost_focus();
                     });
                 });
             });
+        if let Some(t) = add_tag {
+            let sep = if pv.tags.trim().is_empty() { "" } else if pv.tags.trim_end().ends_with(',') { " " } else { ", " };
+            pv.tags = format!("{}{sep}{t}", pv.tags.trim_end());
+            commit = true;
+        }
+        if auto_tags {
+            let tagged = self.tagged_images();
+            self.tagger.start(ctx, self.base_dir.clone(), rel.clone(), tagged);
+        }
         if commit || step != 0 || close || !open {
             self.commit_info(&rel, &pv.tags, &pv.location);
         }

@@ -47,7 +47,7 @@ fn mtime(p: &Path) -> u64 {
 }
 
 /// The first `*.onnx` in `dir` that has a `.json` manifest beside it.
-fn find_model(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn find_model(dir: &Path) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
