@@ -1125,7 +1125,7 @@ impl App {
                         let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
                         // Fixed height of three rows (scrolls if more): the column must not change size when suggestions appear.
                         let area_h = 3.0 * row_h;
-                        egui::ScrollArea::vertical().id_salt("tag_chips").min_scrolled_height(area_h).max_height(area_h).auto_shrink([false, false]).show(ui, |ui| {
+                        egui::ScrollArea::vertical().id_salt("tag_chips").min_scrolled_height(area_h).max_height(area_h).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 if ui.add_enabled(!running, egui::Button::new(if running { "Auto tags ..." } else { "Auto tags" })).clicked() {
                                     auto_tags = true;
