@@ -139,9 +139,21 @@ impl Similar {
                 // A scroll area in an auto-sized window shrinks to one line unless told its content size.
                 let sp = ui.spacing().item_spacing;
                 let rows = matches.len().div_ceil(PER_ROW).max(1) as f32;
-                let want = rows * (TILE.1 + 22.0 + 2.0 * sp.y) + 24.0;
+                let want = rows * (TILE.1 + 22.0 + 2.0 * sp.y) + TILE.1 + 3.0 * sp.y + 24.0;
                 egui::ScrollArea::vertical().min_scrolled_width(PER_ROW as f32 * (TILE.0 + sp.x)).min_scrolled_height(want.min(ctx.screen_rect().height() - 120.0)).show(ui, |ui| {
-                    ui.label(format!("Closest to {}", film_label(query).unwrap_or_else(|| query.clone())));
+                    ui.horizontal(|ui| {
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE.0, TILE.1), egui::Sense::click());
+                        thumbs.paint_cropped(ui, ctx, &base.join(query), rect, 320);
+                        let resp = resp.on_hover_text(query.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            clicked = Some(query.clone());
+                        }
+                        ui.vertical(|ui| {
+                            ui.strong("Query image");
+                            ui.label(film_label(query).unwrap_or_else(|| query.clone()));
+                        });
+                    });
+                    ui.separator();
                     let tiles: Vec<(&String, f32)> = matches.iter().map(|(p, s)| (p, *s)).collect();
                     for row in tiles.chunks(PER_ROW) {
                         ui.horizontal(|ui| {
