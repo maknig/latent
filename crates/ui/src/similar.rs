@@ -140,7 +140,11 @@ impl Similar {
                 let sp = ui.spacing().item_spacing;
                 let rows = matches.len().div_ceil(PER_ROW).max(1) as f32;
                 let want = rows * (TILE.1 + 22.0 + 2.0 * sp.y) + TILE.1 + 3.0 * sp.y + 24.0;
-                egui::ScrollArea::vertical().min_scrolled_width(PER_ROW as f32 * (TILE.0 + sp.x)).min_scrolled_height(want.min(ctx.screen_rect().height() - 120.0)).show(ui, |ui| {
+                // Pin the width: a scroll area otherwise offers its content the whole screen width and the separator fills it.
+                let w = PER_ROW as f32 * TILE.0 + (PER_ROW - 1) as f32 * sp.x;
+                let bar = ui.spacing().scroll.allocated_width();
+                egui::ScrollArea::vertical().max_width(w + bar).min_scrolled_width(w + bar).min_scrolled_height(want.min(ctx.screen_rect().height() - 120.0)).show(ui, |ui| {
+                    ui.set_width(w);
                     ui.horizontal(|ui| {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE.0, TILE.1), egui::Sense::click());
                         thumbs.paint_cropped(ui, ctx, &base.join(query), rect, 320);
