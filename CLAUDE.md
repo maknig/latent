@@ -10,6 +10,7 @@ Cargo workspace (resolver 2):
 - `crates/data` (`fa-data`): `Value`, `Row`, `TableData`, `Store`, CSV/JSON I/O. The `fs` module has atomic save, `import_image` and unused-image listing.
 - `crates/engine` (`fa-engine`): `Engine` (insert/update/delete, undo/redo) and `view(table, &Query)`. `Query` has sort, search, column filters, enum equals and ranges.
 - `crates/ui` (`fa-ui`): the egui `App` (`lib.rs`), thumbnails (`images.rs`) and the dark theme (`apply_theme`).
+- `crates/vision` (`fa-vision`): native-only ONNX models (`ort`, `Model` trait, `OnnxModel`), cosine/HDBSCAN, embedding cache. Models live in `<archive>/models/<name>.onnx` + `<name>.json` (`size`, optional `mean`, `std`, `output`); embeddings are cached in `filmarchiv.vision.json`. UI: image strip context menu "Find similar images" (`crates/ui/src/similar.rs`).
 - `apps/desktop` (package `filmarchiv`): native eframe app.
 - `apps/web` (`filmarchiv-web`): wasm build via trunk (`dist` is gitignored).
 - `apps/import` (`fa-import`): one-off importer from the old Qt data.

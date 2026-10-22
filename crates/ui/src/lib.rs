@@ -12,6 +12,8 @@ mod histogram;
 mod print;
 #[cfg(not(target_arch = "wasm32"))]
 mod images;
+#[cfg(not(target_arch = "wasm32"))]
+mod similar;
 
 /// Decoded preview texture plus its histogram and black/white points.
 #[cfg(not(target_arch = "wasm32"))]
@@ -186,6 +188,8 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     thumbs: images::Thumbs,
     #[cfg(not(target_arch = "wasm32"))]
+    similar: similar::Similar,
+    #[cfg(not(target_arch = "wasm32"))]
     preview: Option<Preview>,
     #[cfg(not(target_arch = "wasm32"))]
     picker: Option<Picker>,
@@ -218,6 +222,8 @@ impl App {
             frame_ms: 0.0,
             #[cfg(not(target_arch = "wasm32"))]
             thumbs: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            similar: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             preview: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -609,6 +615,22 @@ impl App {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn all_image_paths(&self) -> Vec<String> {
+        let s = &self.engine.store;
+        let mut out = vec![];
+        for (t, data) in s.schema.tables.iter().zip(&s.tables) {
+            if let Some(fi) = t.images_index() {
+                for r in &data.rows {
+                    out.extend(fa_data::image_paths(&r.values[fi]));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn image_strip(&mut self, ctx: &egui::Context) {
         if self.image_field().is_none() {
             return;
@@ -621,7 +643,7 @@ impl App {
         // Enlargements per image; only film tables link to the enlargement table.
         let linkable = self.engine.store.schema.tables[self.table].role == Some(TableRole::Film) && self.enlargement_target().is_some();
         let counts: Vec<usize> = paths.iter().map(|p| if linkable { fa_data::enlargements_for(&self.engine.store, p).len() } else { 0 }).collect();
-        let (mut new_enl, mut show_enl) = (None, None);
+        let (mut new_enl, mut show_enl, mut find_similar) = (None, None, None);
         egui::TopBottomPanel::bottom("images").resizable(true).default_height(150.0).min_height(60.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Images").strong());
@@ -670,6 +692,10 @@ impl App {
                                     ui.close_menu();
                                 }
                             }
+                            if ui.button("Find similar images").clicked() {
+                                find_similar = Some(p.clone());
+                                ui.close_menu();
+                            }
                             if !is_source && ui.button("Remove").clicked() {
                                 remove = Some(n - skip);
                                 ui.close_menu();
@@ -685,6 +711,10 @@ impl App {
         if let Some(p) = new_enl {
             self.new_enlargement(p);
             return;
+        }
+        if let Some(q) = find_similar {
+            let all = self.all_image_paths();
+            self.similar.start(ctx, self.base_dir.clone(), all, q);
         }
         if let Some(p) = show_enl {
             self.show_enlargements(p);
@@ -1359,6 +1389,8 @@ impl eframe::App for App {
         self.preview_window(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.unused_dialog(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.similar.show(ctx, &mut self.thumbs, &self.base_dir);
 
         let mut commit = false;
         let mut cancel = false;

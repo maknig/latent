@@ -13,6 +13,7 @@ rfd = "0.15"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
+fa-vision = { path = "../vision" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
