@@ -1123,25 +1123,26 @@ impl App {
                         commit |= ui.add(egui::TextEdit::multiline(&mut pv.tags).desired_rows(3).desired_width(f32::INFINITY)).lost_focus();
                         // Room for three rows of chips so the column does not jump when suggestions appear.
                         let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-                        ui.scope(|ui| {
-                        ui.set_min_height(3.0 * row_h);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.add_enabled(!running, egui::Button::new(if running { "Auto tags ..." } else { "Auto tags" })).clicked() {
-                                auto_tags = true;
-                            }
-                            for (t, s) in &chips {
-                                if ui.button(format!("{t} {s:.2}")).on_hover_text("Add tag").clicked() {
-                                    add_tag = Some(t.clone());
+                        // Fixed height of three rows (scrolls if more): the column must not change size when suggestions appear.
+                        let area_h = 3.0 * row_h;
+                        egui::ScrollArea::vertical().id_salt("tag_chips").min_scrolled_height(area_h).max_height(area_h).auto_shrink([false, false]).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.add_enabled(!running, egui::Button::new(if running { "Auto tags ..." } else { "Auto tags" })).clicked() {
+                                    auto_tags = true;
                                 }
+                                for (t, s) in &chips {
+                                    if ui.button(format!("{t} {s:.2}")).on_hover_text("Add tag").clicked() {
+                                        add_tag = Some(t.clone());
+                                    }
+                                }
+                            });
+                            if searched && chips.is_empty() && !running {
+                                ui.weak("No new suggestions");
+                            }
+                            if let Some(e) = &tag_error {
+                                ui.colored_label(egui::Color32::LIGHT_RED, e);
                             }
                         });
-                        if searched && chips.is_empty() && !running {
-                            ui.weak("No new suggestions");
-                        }
-                        });
-                        if let Some(e) = &tag_error {
-                            ui.colored_label(egui::Color32::LIGHT_RED, e);
-                        }
                         ui.add_space(4.0);
                         ui.label("Ort");
                         commit |= ui.add(egui::TextEdit::singleline(&mut pv.location).desired_width(f32::INFINITY)).lost_focus();
