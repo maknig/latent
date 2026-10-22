@@ -99,3 +99,55 @@ impl Model for OnnxModel {
         }
     }
 }
+
+/// `"kind"` entry of the JSON beside `onnx` (`"clip-image"`, `"clip-text"`); `None` for a plain embedding model.
+pub fn kind_of(onnx: &Path) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(onnx.with_extension("json")).ok()?).ok()?;
+    v.get("kind")?.as_str().map(String::from)
+}
+
+#[derive(Deserialize)]
+struct TextManifest {
+    /// Tokenizer file next to the model, default `tokenizer.json`.
+    #[serde(default = "tokenizer_name")]
+    tokenizer: String,
+}
+
+fn tokenizer_name() -> String {
+    "tokenizer.json".into()
+}
+
+/// A text encoder (CLIP): text in, embedding out.
+pub struct TextModel {
+    id: String,
+    tokenizer: tokenizers::Tokenizer,
+    session: Mutex<Session>,
+}
+
+impl TextModel {
+    /// Loads `<name>.onnx` with `<name>.json` and the tokenizer it names.
+    pub fn load(onnx: &Path) -> Result<Self, VisionError> {
+        let m: TextManifest = serde_json::from_slice(&std::fs::read(onnx.with_extension("json"))?)?;
+        let tokenizer_path = onnx.with_file_name(&m.tokenizer);
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| VisionError::Model(format!("{}: {e}", tokenizer_path.display())))?;
+        let err = |e: ort::Error| VisionError::Model(e.to_string());
+        let session = Session::builder().map_err(err)?.commit_from_file(onnx).map_err(err)?;
+        let id = onnx.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(Self { id, tokenizer, session: Mutex::new(session) })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn embed(&self, text: &str) -> Result<Vec<f32>, VisionError> {
+        let err = |e: ort::Error| VisionError::Model(e.to_string());
+        let enc = self.tokenizer.encode(text, true).map_err(|e| VisionError::Model(e.to_string()))?;
+        let ids: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
+        let input = Tensor::from_array(([1i64, ids.len() as i64], ids)).map_err(err)?;
+        let mut session = self.session.lock().unwrap();
+        let outputs = session.run(ort::inputs![input]).map_err(err)?;
+        let (_, values) = outputs[0].try_extract_tensor::<f32>().map_err(err)?;
+        Ok(values.to_vec())
+    }
+}

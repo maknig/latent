@@ -30,6 +30,17 @@ pub fn suggest_from_neighbours(query: &[f32], tagged: &[(Vec<f32>, Vec<String>)]
     out
 }
 
+/// CLIP zero-shot: softmax over the vocabulary of `scale * cosine(image, text)`; sorted by probability, best first.
+pub fn score_tags(image: &[f32], texts: &[(String, Vec<f32>)], scale: f32) -> Vec<(String, f32)> {
+    let logits: Vec<f32> = texts.iter().map(|(_, t)| scale * cosine(image, t)).collect();
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    let mut out: Vec<(String, f32)> = texts.iter().zip(exps).map(|((t, _), e)| (t.clone(), e / sum)).collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +67,15 @@ mod tests {
         assert!((r[0].1 - 1.0).abs() < 1e-6);
         assert!(r.iter().all(|(t, _)| t != "Portrait"));
         assert!(r[1].1 < r[0].1);
+    }
+
+    #[test]
+    fn clip_scores_sum_to_one_and_rank() {
+        let texts = vec![("a".to_string(), vec![1.0, 0.0]), ("b".to_string(), vec![0.0, 1.0])];
+        let r = score_tags(&[0.9, 0.1], &texts, 100.0);
+        assert_eq!(r[0].0, "a");
+        assert!((r.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(r[0].1 > 0.99);
     }
 
     #[test]

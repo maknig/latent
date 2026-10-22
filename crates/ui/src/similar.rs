@@ -51,7 +51,7 @@ pub(crate) fn find_model(dir: &Path) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "onnx") && p.with_extension("json").exists())
+        .filter(|p| p.extension().is_some_and(|x| x == "onnx") && p.with_extension("json").exists() && fa_vision::kind_of(p).is_none())
         .collect();
     found.sort();
     found.into_iter().next()
