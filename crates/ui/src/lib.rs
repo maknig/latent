@@ -1012,9 +1012,12 @@ impl App {
             })
             .unwrap_or_default();
         const SIDE: f32 = 256.0;
-        const VIEW: egui::Vec2 = egui::vec2(640.0, 520.0);
-        // The viewport is as tall as the side column was in the last frame (tag chips included), at least VIEW.y.
-        let view = egui::vec2(VIEW.x, pv.side_h.max(VIEW.y).min((ctx.screen_rect().height() - 120.0).max(VIEW.y)));
+        // Smallest edge of the square image area, and the side column's minimum height.
+        const VIEW_MIN: f32 = 720.0;
+        const SIDE_MIN: f32 = 520.0;
+        // Square image area: as tall as the side column was in the last frame (tag chips included), at least VIEW_MIN.
+        let edge = pv.side_h.max(VIEW_MIN).min((ctx.screen_rect().height() - 120.0).max(SIDE_MIN));
+        let view = egui::vec2(edge, edge);
         self.tagger.poll();
         let chips: Vec<(String, f32)> = match &self.tagger.result {
             Some((q, r)) if *q == rel => {
@@ -1032,7 +1035,7 @@ impl App {
             .open(&mut open)
             .auto_sized()
             .show(ctx, |ui| {
-                ui.set_max_width(VIEW.x + SIDE + ui.spacing().item_spacing.x);
+                ui.set_max_width(view.x + SIDE + ui.spacing().item_spacing.x);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(pv.index > 0, egui::Button::new("◀ Back")).clicked() {
                         step = -1;
@@ -1095,7 +1098,7 @@ impl App {
                     });
                     let side = ui.vertical(|ui| {
                         ui.set_width(SIDE);
-                        ui.set_min_height(VIEW.y);
+                        ui.set_min_height(SIDE_MIN);
                         ui.label(egui::RichText::new(heading).strong());
                         egui::Grid::new("film_info").num_columns(2).spacing([8.0, 2.0]).show(ui, |ui| {
                             for (k, v) in &details {
