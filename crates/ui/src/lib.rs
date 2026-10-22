@@ -39,12 +39,14 @@ struct Preview {
     shown: Option<Shown>,
     /// Direction of the last Back/Next (-1 or 1); the image that way is preloaded.
     dir: i32,
+    /// Height of the side column in the previous frame; the image viewport follows it.
+    side_h: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Preview {
     fn new(table: usize, row: u64, index: usize) -> Self {
-        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1 }
+        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0 }
     }
 }
 
@@ -1011,6 +1013,8 @@ impl App {
             .unwrap_or_default();
         const SIDE: f32 = 256.0;
         const VIEW: egui::Vec2 = egui::vec2(640.0, 520.0);
+        // The viewport is as tall as the side column was in the last frame (tag chips included), at least VIEW.y.
+        let view = egui::vec2(VIEW.x, pv.side_h.max(VIEW.y).min((ctx.screen_rect().height() - 120.0).max(VIEW.y)));
         self.tagger.poll();
         let chips: Vec<(String, f32)> = match &self.tagger.result {
             Some((q, r)) if *q == rel => {
@@ -1051,15 +1055,15 @@ impl App {
                 });
                 ui.separator();
                 ui.horizontal_top(|ui| {
-                    ui.allocate_ui(VIEW, |ui| {
-                        egui::ScrollArea::both().id_salt(&rel).max_width(VIEW.x).max_height(VIEW.y).auto_shrink([false, false]).show(ui, |ui| {
+                    ui.allocate_ui(view, |ui| {
+                        egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).show(ui, |ui| {
                             let Some((id, s)) = tex else {
                                 ui.spinner();
                                 return;
                             };
-                            let fit = (VIEW.x / s.x).min(VIEW.y / s.y) * 0.99;
+                            let fit = (view.x / s.x).min(view.y / s.y) * 0.99;
                             let img = s * fit * pv.zoom;
-                            let (cell, resp) = ui.allocate_exact_size(img.max(VIEW), egui::Sense::click());
+                            let (cell, resp) = ui.allocate_exact_size(img.max(view), egui::Sense::click());
                             let rect = egui::Rect::from_center_size(cell.center(), img);
                             if resp.hovered() {
                                 let (z, wheel) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
@@ -1089,7 +1093,7 @@ impl App {
                             }
                         });
                     });
-                    ui.vertical(|ui| {
+                    let side = ui.vertical(|ui| {
                         ui.set_width(SIDE);
                         ui.set_min_height(VIEW.y);
                         ui.label(egui::RichText::new(heading).strong());
@@ -1114,6 +1118,10 @@ impl App {
                         ui.add_space(8.0);
                         ui.label("Tags");
                         commit |= ui.add(egui::TextEdit::multiline(&mut pv.tags).desired_rows(3).desired_width(f32::INFINITY)).lost_focus();
+                        // Room for three rows of chips so the column does not jump when suggestions appear.
+                        let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                        ui.scope(|ui| {
+                        ui.set_min_height(3.0 * row_h);
                         ui.horizontal_wrapped(|ui| {
                             if ui.add_enabled(!running, egui::Button::new(if running { "Auto tags ..." } else { "Auto tags" })).clicked() {
                                 auto_tags = true;
@@ -1127,6 +1135,7 @@ impl App {
                         if searched && chips.is_empty() && !running {
                             ui.weak("No new suggestions");
                         }
+                        });
                         if let Some(e) = &tag_error {
                             ui.colored_label(egui::Color32::LIGHT_RED, e);
                         }
@@ -1134,6 +1143,11 @@ impl App {
                         ui.label("Ort");
                         commit |= ui.add(egui::TextEdit::singleline(&mut pv.location).desired_width(f32::INFINITY)).lost_focus();
                     });
+                    let h = side.response.rect.height();
+                    if (h - pv.side_h).abs() > 1.0 {
+                        pv.side_h = h;
+                        ctx.request_repaint();
+                    }
                 });
             });
         if let Some(t) = add_tag {
