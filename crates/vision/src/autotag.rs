@@ -113,7 +113,11 @@ fn people(models: &Path, base: &Path, query: &str) -> Result<Vec<(String, f32)>,
             let detector = FaceDetector::load(&det).map_err(|e| e.to_string())?;
             let embedder = OnnxModel::load(&emb).map_err(|e| e.to_string())?;
             let img = image::open(&full).map_err(|e| format!("{query}: {e}"))?;
-            let faces = embed_faces(&detector, &embedder, &img).map_err(|e| e.to_string())?;
+            let faces: Vec<_> = embed_faces(&detector, &embedder, &img)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
             store.set_faces(query, mtime, faces.clone());
             store.save(&store_path).map_err(|e| e.to_string())?;
             faces

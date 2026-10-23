@@ -163,24 +163,36 @@ pub fn match_people(query: &[f32], gallery: &[(u32, &[f32])], min_cosine: f32) -
 }
 
 /// Detects, aligns and embeds the faces of one image, skipping small and unsure ones.
+/// Each face comes with its aligned 112x112 crop (for thumbnails).
 pub fn embed_faces(
     detector: &FaceDetector,
     embedder: &OnnxModel,
     img: &DynamicImage,
-) -> Result<Vec<StoredFace>, VisionError> {
+) -> Result<Vec<(StoredFace, DynamicImage)>, VisionError> {
     let mut out = vec![];
     for f in detector.detect(img, MIN_SCORE)? {
         if f.width().min(f.height()) < MIN_SIDE {
             continue;
         }
-        let embedding = normalize(embedder.run(&align(img, &f))?);
-        out.push(StoredFace {
-            bbox: f.bbox,
-            embedding,
-            person: None,
-        });
+        let crop = align(img, &f);
+        let embedding = normalize(embedder.run(&crop)?);
+        out.push((
+            StoredFace {
+                bbox: f.bbox,
+                embedding,
+                person: None,
+            },
+            crop,
+        ));
     }
     Ok(out)
+}
+
+/// Where the thumbnail of face `index` of `image` (archive-relative) is kept: a cache below `.thumbs`, written when the face is found.
+pub fn face_crop_path(base: &Path, image: &str, index: usize) -> std::path::PathBuf {
+    base.join(".thumbs")
+        .join("faces")
+        .join(format!("{}_{index}.png", image.replace(['/', '\\'], "_")))
 }
 
 #[cfg(test)]

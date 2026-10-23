@@ -13,6 +13,8 @@ mod print;
 #[cfg(not(target_arch = "wasm32"))]
 mod images;
 #[cfg(not(target_arch = "wasm32"))]
+mod people;
+#[cfg(not(target_arch = "wasm32"))]
 mod similar;
 #[cfg(not(target_arch = "wasm32"))]
 mod tagger;
@@ -194,6 +196,8 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     similar: similar::Similar,
     #[cfg(not(target_arch = "wasm32"))]
+    people: people::People,
+    #[cfg(not(target_arch = "wasm32"))]
     tagger: tagger::Tagger,
     #[cfg(not(target_arch = "wasm32"))]
     preview: Option<Preview>,
@@ -230,6 +234,8 @@ impl App {
             thumbs: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             similar: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            people: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             tagger: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1412,6 +1418,12 @@ impl eframe::App for App {
                 ui.menu_button("View", |ui| {
                     if ui.button("Filter...").clicked() { self.show_filters = true; ui.close_menu(); }
                     if ui.button("Clear filters").clicked() { self.clear_filters(); ui.close_menu(); }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button("People...").clicked() {
+                        let all = self.all_image_paths();
+                        self.people.start(ctx, self.base_dir.clone(), all);
+                        ui.close_menu();
+                    }
                 });
             });
         });
@@ -1487,6 +1499,20 @@ impl eframe::App for App {
             match self.locate_image(&p) {
                 Some(pv) => self.preview = Some(pv),
                 None => self.status = "Image not in any row".into(),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (rescan, clicked) = self.people.show(ctx, &mut self.thumbs, &self.base_dir);
+            if rescan {
+                let all = self.all_image_paths();
+                self.people.start(ctx, self.base_dir.clone(), all);
+            }
+            if let Some(p) = clicked {
+                match self.locate_image(&p) {
+                    Some(pv) => self.preview = Some(pv),
+                    None => self.status = "Image not in any row".into(),
+                }
             }
         }
 
