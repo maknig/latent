@@ -43,6 +43,15 @@ enum Msg {
     Error(String),
 }
 
+/// Where a face is moved to.
+enum Target {
+    /// The faces without a group.
+    Loose,
+    Person(u32),
+    /// A person with this name (an existing one if the name is known).
+    New(String),
+}
+
 pub struct People {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -51,6 +60,8 @@ pub struct People {
     progress: Option<(usize, usize)>,
     cancel: Arc<AtomicBool>,
     groups: Vec<Group>,
+    /// Name typed into the "This is..." submenu.
+    new_name: String,
     error: Option<String>,
 }
 
@@ -64,6 +75,7 @@ impl Default for People {
             progress: None,
             cancel: Default::default(),
             groups: vec![],
+            new_name: String::new(),
             error: None,
         }
     }
@@ -249,16 +261,21 @@ impl People {
         Ok(())
     }
 
-    /// Moves one face to `person` (`None`: to the faces without a group) and saves it.
+    /// Moves one face to `target` and saves it.
     fn move_face(
         &mut self,
         base: &Path,
         gi: usize,
         fi: usize,
-        person: Option<u32>,
+        target: Target,
     ) -> Result<(), String> {
         let path = store_path(base);
         let mut store = FaceStore::load(&path);
+        let person = match target {
+            Target::Loose => None,
+            Target::Person(p) => Some(p),
+            Target::New(name) => Some(store.person_id(&name)),
+        };
         let f = self.groups[gi].faces.remove(fi);
         store.assign(&f.image, f.index, person);
         store.prune(&|_| true);
@@ -266,22 +283,34 @@ impl People {
         if self.groups[gi].faces.is_empty() {
             self.groups.remove(gi);
         }
-        let target = self
+        let existing = self
             .groups
             .iter()
             .position(|g| g.person == person && g.person.is_some() || person.is_none() && g.loose);
-        match target {
+        match existing {
             Some(t) => self.groups[t].faces.push(f),
-            None => self.groups.push(Group {
-                person,
-                loose: person.is_none(),
-                expanded: false,
-                name: person
-                    .and_then(|p| store.person_name(p))
-                    .unwrap_or_default()
-                    .to_string(),
-                faces: vec![f],
-            }),
+            None => {
+                let group = Group {
+                    person,
+                    loose: person.is_none(),
+                    expanded: false,
+                    name: person
+                        .and_then(|p| store.person_name(p))
+                        .unwrap_or_default()
+                        .to_string(),
+                    faces: vec![f],
+                };
+                // New people go after the named ones, the faces without a group stay last.
+                let at = match person {
+                    Some(_) => self
+                        .groups
+                        .iter()
+                        .position(|g| g.person.is_none())
+                        .unwrap_or(self.groups.len()),
+                    None => self.groups.len(),
+                };
+                self.groups.insert(at, group);
+            }
         }
         Ok(())
     }
@@ -310,7 +339,8 @@ impl People {
         if !self.open {
             return (rescan, clicked);
         }
-        let (mut open, mut name, mut moved) = (true, None, None);
+        let (mut open, mut name, mut moved) = (true, None, None::<(usize, usize, Target)>);
+        let new_name = &mut self.new_name;
         let faces: usize = self.groups.iter().map(|g| g.faces.len()).sum();
         let loose: usize = self
             .groups
@@ -409,17 +439,45 @@ impl People {
                                             if g.person.is_some()
                                                 && ui.button("Not this person").clicked()
                                             {
-                                                moved = Some((gi, fi, None));
+                                                moved = Some((gi, fi, Target::Loose));
                                                 ui.close_menu();
                                             }
-                                            for (id, n) in &named {
-                                                if g.person != Some(*id)
-                                                    && ui.button(format!("This is {n}")).clicked()
-                                                {
-                                                    moved = Some((gi, fi, Some(*id)));
+                                            ui.menu_button("This is...", |ui| {
+                                                let edit = ui.add(
+                                                    egui::TextEdit::singleline(new_name)
+                                                        .hint_text("New person...")
+                                                        .desired_width(140.0),
+                                                );
+                                                let enter = edit.lost_focus()
+                                                    && ui
+                                                        .input(|i| i.key_pressed(egui::Key::Enter));
+                                                if enter && !new_name.trim().is_empty() {
+                                                    moved = Some((
+                                                        gi,
+                                                        fi,
+                                                        Target::New(new_name.trim().to_string()),
+                                                    ));
+                                                    new_name.clear();
                                                     ui.close_menu();
                                                 }
-                                            }
+                                                ui.separator();
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(300.0)
+                                                    .show(ui, |ui| {
+                                                        for (id, n) in &named {
+                                                            if g.person != Some(*id)
+                                                                && ui.button(n).clicked()
+                                                            {
+                                                                moved = Some((
+                                                                    gi,
+                                                                    fi,
+                                                                    Target::Person(*id),
+                                                                ));
+                                                                ui.close_menu();
+                                                            }
+                                                        }
+                                                    });
+                                            });
                                         });
                                     }
                                 }
@@ -445,7 +503,7 @@ impl People {
         // Only one change per frame: indices into `groups` are stale after the first one.
         let result = match (name, moved) {
             (Some(gi), _) => self.name_group(base, gi),
-            (None, Some((gi, fi, person))) => self.move_face(base, gi, fi, person),
+            (None, Some((gi, fi, target))) => self.move_face(base, gi, fi, target),
             _ => Ok(()),
         };
         if let Err(e) = result {
