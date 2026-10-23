@@ -3,12 +3,14 @@
 mod autotag;
 mod cache;
 mod cluster;
+mod faces;
 mod onnx;
 mod tags;
 
 pub use autotag::{find_kind, suggest as suggest_tags, DEFAULT_TAGS};
 pub use cache::EmbeddingCache;
 pub use cluster::{cluster, cosine, most_similar};
+pub use faces::{align, nms, normalize, Face, FaceDetector};
 pub use onnx::{kind_of, Manifest, OnnxModel, TextModel};
 pub use tags::{score_tags, split_tags, suggest_from_neighbours};
 
