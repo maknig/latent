@@ -3,7 +3,7 @@
 //! - CLIP zero-shot scores of a vocabulary (`clip-image` + `clip-text` in `models/`).
 //!
 //! Embeddings are cached in `filmarchiv.vision.json` next to the data.
-use crate::{score_tags, suggest_from_neighbours, EmbeddingCache, Model, OnnxModel, TextModel};
+use crate::{embed_faces, score_tags, suggest_from_neighbours, EmbeddingCache, FaceDetector, FaceStore, Model, OnnxModel, TextModel, FACE_MATCH};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -97,7 +97,44 @@ fn clip(models: &Path, base: &Path, cache: &mut EmbeddingCache, query: &str, voc
     Ok(score_tags(&q, &texts, CLIP_SCALE))
 }
 
-/// Merges both sources by tag (case-insensitive): the better score wins, tags found by both get a bonus.
+/// Names of the people whose faces look like the faces in `query` (see `FaceStore`; people are named in the "Find people" window).
+fn people(models: &Path, base: &Path, query: &str) -> Result<Vec<(String, f32)>, String> {
+    let (Some(det), Some(emb)) = (find_kind(models, Some("face-detect")), find_kind(models, Some("face-embed"))) else { return Ok(vec![]) };
+    let store_path = base.join("filmarchiv.faces.json");
+    let mut store = FaceStore::load(&store_path);
+    if store.people().next().is_none() {
+        return Ok(vec![]);
+    }
+    let full = base.join(query);
+    let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let faces = match store.faces(query, mtime) {
+        Some(f) => f.to_vec(),
+        None => {
+            let detector = FaceDetector::load(&det).map_err(|e| e.to_string())?;
+            let embedder = OnnxModel::load(&emb).map_err(|e| e.to_string())?;
+            let img = image::open(&full).map_err(|e| format!("{query}: {e}"))?;
+            let faces = embed_faces(&detector, &embedder, &img).map_err(|e| e.to_string())?;
+            store.set_faces(query, mtime, faces.clone());
+            store.save(&store_path).map_err(|e| e.to_string())?;
+            faces
+        }
+    };
+    // Best match per person over all faces in the image; cosine FACE_MATCH..0.7 maps to 0.5..1.
+    let mut best: Vec<(String, f32)> = vec![];
+    for f in &faces {
+        for (id, cos) in store.match_people(&f.embedding, query, FACE_MATCH) {
+            let Some(name) = store.person_name(id) else { continue };
+            let score = 0.5 + 0.5 * ((cos - FACE_MATCH) / (0.7 - FACE_MATCH)).clamp(0.0, 1.0);
+            match best.iter_mut().find(|(n, _)| n == name) {
+                Some(b) => b.1 = b.1.max(score),
+                None => best.push((name.to_string(), score)),
+            }
+        }
+    }
+    Ok(best)
+}
+
+/// Merges the sources by tag (case-insensitive): the better score wins, tags found by both get a bonus.
 fn merge(a: Vec<(String, f32)>, b: Vec<(String, f32)>) -> Vec<(String, f32)> {
     let mut out = a;
     for (tag, s) in b {
@@ -113,7 +150,7 @@ fn merge(a: Vec<(String, f32)>, b: Vec<(String, f32)>) -> Vec<(String, f32)> {
 /// Suggestions (tag, score) for image `query` (archive-relative). `tagged` are the images that already have tags.
 pub fn suggest(base: &Path, query: &str, tagged: &[(String, Vec<String>)]) -> Result<Vec<(String, f32)>, String> {
     let models = base.join("models");
-    if find_kind(&models, None).is_none() && find_kind(&models, Some("clip-image")).is_none() {
+    if find_kind(&models, None).is_none() && find_kind(&models, Some("clip-image")).is_none() && find_kind(&models, Some("face-embed")).is_none() {
         return Err(format!("No model in {}", models.display()));
     }
     let cache_path = base.join("filmarchiv.vision.json");
@@ -133,5 +170,6 @@ pub fn suggest(base: &Path, query: &str, tagged: &[(String, Vec<String>)]) -> Re
     let near = neighbours(&models, base, &mut cache, query, tagged)?;
     let by_clip = clip(&models, base, &mut cache, query, &vocabulary)?;
     cache.save(&cache_path).map_err(|e| e.to_string())?;
-    Ok(merge(near, by_clip))
+    let names = people(&models, base, query)?;
+    Ok(merge(merge(near, by_clip), names))
 }
