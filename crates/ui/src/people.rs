@@ -4,7 +4,8 @@
 use crate::images::Thumbs;
 use eframe::egui;
 use fa_vision::{
-    embed_faces, face_crop_path, find_kind, FaceDetector, FaceStore, OnnxModel, FACE_MATCH,
+    embed_faces, face_crop_path, find_kind, save_crops, FaceDetector, FaceStore, OnnxModel,
+    FACE_MATCH,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 /// Smallest group of unnamed faces that is shown as a group.
 const MIN_CLUSTER: usize = 3;
-/// Faces shown per group.
+/// Faces shown per collapsed group.
 const SHOWN: usize = 12;
 const CROP: f32 = 64.0;
 /// The store is written after this many newly scanned images.
@@ -28,6 +29,9 @@ struct FaceRef {
 
 struct Group {
     person: Option<u32>,
+    /// The faces that belong to no group (cannot be named as a whole).
+    loose: bool,
+    expanded: bool,
     /// Name being edited.
     name: String,
     faces: Vec<FaceRef>,
@@ -35,8 +39,7 @@ struct Group {
 
 enum Msg {
     Progress(usize, usize),
-    /// Groups and the number of faces that belong to no group.
-    Done(Vec<Group>, usize),
+    Done(Vec<Group>),
     Error(String),
 }
 
@@ -48,7 +51,6 @@ pub struct People {
     progress: Option<(usize, usize)>,
     cancel: Arc<AtomicBool>,
     groups: Vec<Group>,
-    loose: usize,
     error: Option<String>,
 }
 
@@ -62,7 +64,6 @@ impl Default for People {
             progress: None,
             cancel: Default::default(),
             groups: vec![],
-            loose: 0,
             error: None,
         }
     }
@@ -80,8 +81,8 @@ fn store_path(base: &Path) -> PathBuf {
     base.join("filmarchiv.faces.json")
 }
 
-/// Named people first, then clusters of unnamed faces, each biggest first. Also returns how many faces are in no group.
-fn groups_of(store: &FaceStore) -> Result<(Vec<Group>, usize), String> {
+/// Named people first, then clusters of unnamed faces (biggest first), then the faces that are in no cluster.
+fn groups_of(store: &FaceStore) -> Result<Vec<Group>, String> {
     let mut named: BTreeMap<u32, Vec<FaceRef>> = BTreeMap::new();
     let mut unnamed: Vec<(FaceRef, &[f32])> = vec![];
     for (image, index, f) in store.all() {
@@ -99,6 +100,8 @@ fn groups_of(store: &FaceStore) -> Result<(Vec<Group>, usize), String> {
         .filter_map(|(p, faces)| {
             Some(Group {
                 person: Some(p),
+                loose: false,
+                expanded: false,
                 name: store.person_name(p)?.to_string(),
                 faces,
             })
@@ -108,21 +111,32 @@ fn groups_of(store: &FaceStore) -> Result<(Vec<Group>, usize), String> {
     let vectors: Vec<Vec<f32>> = unnamed.iter().map(|(_, v)| v.to_vec()).collect();
     let labels = fa_vision::cluster(&vectors, MIN_CLUSTER).map_err(|e| e.to_string())?;
     let mut clusters: BTreeMap<usize, Vec<FaceRef>> = BTreeMap::new();
-    let mut loose = 0;
+    let mut loose = vec![];
     for ((r, _), l) in unnamed.into_iter().zip(labels) {
         match l {
             Some(c) => clusters.entry(c).or_default().push(r),
-            None => loose += 1,
+            None => loose.push(r),
         }
     }
     let mut clusters: Vec<Vec<FaceRef>> = clusters.into_values().collect();
     clusters.sort_by_key(|c| std::cmp::Reverse(c.len()));
     groups.extend(clusters.into_iter().map(|faces| Group {
         person: None,
+        loose: false,
+        expanded: false,
         name: String::new(),
         faces,
     }));
-    Ok((groups, loose))
+    if !loose.is_empty() {
+        groups.push(Group {
+            person: None,
+            loose: true,
+            expanded: false,
+            name: String::new(),
+            faces: loose,
+        });
+    }
+    Ok(groups)
 }
 
 fn job(
@@ -131,7 +145,7 @@ fn job(
     cancel: &AtomicBool,
     tx: &Sender<Msg>,
     ctx: &egui::Context,
-) -> Result<(Vec<Group>, usize), String> {
+) -> Result<Vec<Group>, String> {
     let models = base.join("models");
     let missing = |what: &str| {
         format!(
@@ -157,14 +171,7 @@ fn job(
             // Unreadable images are skipped, not fatal.
             if let Ok(img) = image::open(&full) {
                 if let Ok(found) = embed_faces(&detector, &embedder, &img) {
-                    for (i, (_, crop)) in found.iter().enumerate() {
-                        let p = face_crop_path(base, rel, i);
-                        if let Some(dir) = p.parent() {
-                            let _ = std::fs::create_dir_all(dir);
-                        }
-                        let _ = crop.save(&p);
-                    }
-                    store.set_faces(rel, mt, found.into_iter().map(|(f, _)| f).collect());
+                    store.set_faces(rel, mt, save_crops(base, rel, found));
                     fresh += 1;
                     if fresh % SAVE_EVERY == 0 {
                         store.save(&path).map_err(|e| e.to_string())?;
@@ -207,7 +214,7 @@ impl People {
         let (tx, ctx, cancel) = (self.tx.clone(), ctx.clone(), self.cancel.clone());
         std::thread::spawn(move || {
             let msg = match job(&base, &all, &cancel, &tx, &ctx) {
-                Ok((g, loose)) => Msg::Done(g, loose),
+                Ok(g) => Msg::Done(g),
                 Err(e) => Msg::Error(e),
             };
             let _ = tx.send(msg);
@@ -242,18 +249,40 @@ impl People {
         Ok(())
     }
 
-    /// Takes one face out of a named group.
-    fn remove_face(&mut self, base: &Path, gi: usize, fi: usize) -> Result<(), String> {
+    /// Moves one face to `person` (`None`: to the faces without a group) and saves it.
+    fn move_face(
+        &mut self,
+        base: &Path,
+        gi: usize,
+        fi: usize,
+        person: Option<u32>,
+    ) -> Result<(), String> {
         let path = store_path(base);
         let mut store = FaceStore::load(&path);
         let f = self.groups[gi].faces.remove(fi);
-        store.assign(&f.image, f.index, None);
+        store.assign(&f.image, f.index, person);
         store.prune(&|_| true);
         store.save(&path).map_err(|e| e.to_string())?;
         if self.groups[gi].faces.is_empty() {
             self.groups.remove(gi);
         }
-        self.loose += 1;
+        let target = self
+            .groups
+            .iter()
+            .position(|g| g.person == person && g.person.is_some() || person.is_none() && g.loose);
+        match target {
+            Some(t) => self.groups[t].faces.push(f),
+            None => self.groups.push(Group {
+                person,
+                loose: person.is_none(),
+                expanded: false,
+                name: person
+                    .and_then(|p| store.person_name(p))
+                    .unwrap_or_default()
+                    .to_string(),
+                faces: vec![f],
+            }),
+        }
         Ok(())
     }
 
@@ -267,10 +296,9 @@ impl People {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Progress(d, t) => self.progress = Some((d, t)),
-                Msg::Done(g, loose) => {
+                Msg::Done(g) => {
                     self.progress = None;
                     self.groups = g;
-                    self.loose = loose;
                 }
                 Msg::Error(e) => {
                     self.progress = None;
@@ -282,7 +310,19 @@ impl People {
         if !self.open {
             return (rescan, clicked);
         }
-        let (mut open, mut name, mut remove) = (true, None, None);
+        let (mut open, mut name, mut moved) = (true, None, None);
+        let faces: usize = self.groups.iter().map(|g| g.faces.len()).sum();
+        let loose: usize = self
+            .groups
+            .iter()
+            .filter(|g| g.loose)
+            .map(|g| g.faces.len())
+            .sum();
+        let named: Vec<(u32, String)> = self
+            .groups
+            .iter()
+            .filter_map(|g| Some((g.person?, g.name.clone())))
+            .collect();
         egui::Window::new("People")
             .open(&mut open)
             .default_width(6.0 * (CROP + 8.0) + 80.0)
@@ -304,9 +344,8 @@ impl People {
                             rescan = true;
                         }
                         ui.weak(format!(
-                            "{} group(s), {} face(s) without a group",
-                            self.groups.len(),
-                            self.loose
+                            "{faces} face(s), {} named, {loose} without a group",
+                            named.len()
                         ));
                     }
                 });
@@ -319,6 +358,14 @@ impl People {
                     .show(ui, |ui| {
                         for (gi, g) in self.groups.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
+                                if g.loose {
+                                    ui.strong("Without a group");
+                                    ui.weak(format!(
+                                        "{} face(s): right-click a face to name it",
+                                        g.faces.len()
+                                    ));
+                                    return;
+                                }
                                 let resp = ui.add(
                                     egui::TextEdit::singleline(&mut g.name)
                                         .hint_text("Name")
@@ -336,7 +383,8 @@ impl People {
                                 ));
                             });
                             ui.horizontal_wrapped(|ui| {
-                                for (fi, f) in g.faces.iter().take(SHOWN).enumerate() {
+                                let shown = if g.expanded { g.faces.len() } else { SHOWN };
+                                for (fi, f) in g.faces.iter().take(shown).enumerate() {
                                     let (rect, resp) = ui.allocate_exact_size(
                                         egui::vec2(CROP, CROP),
                                         egui::Sense::click(),
@@ -356,17 +404,34 @@ impl People {
                                     if resp.clicked() {
                                         clicked = Some(f.image.clone());
                                     }
-                                    if g.person.is_some() {
+                                    if g.person.is_some() || g.loose {
                                         resp.context_menu(|ui| {
-                                            if ui.button("Not this person").clicked() {
-                                                remove = Some((gi, fi));
+                                            if g.person.is_some()
+                                                && ui.button("Not this person").clicked()
+                                            {
+                                                moved = Some((gi, fi, None));
                                                 ui.close_menu();
+                                            }
+                                            for (id, n) in &named {
+                                                if g.person != Some(*id)
+                                                    && ui.button(format!("This is {n}")).clicked()
+                                                {
+                                                    moved = Some((gi, fi, Some(*id)));
+                                                    ui.close_menu();
+                                                }
                                             }
                                         });
                                     }
                                 }
                                 if g.faces.len() > SHOWN {
-                                    ui.weak(format!("+{}", g.faces.len() - SHOWN));
+                                    let label = if g.expanded {
+                                        "Show fewer".to_string()
+                                    } else {
+                                        format!("Show all ({})", g.faces.len())
+                                    };
+                                    if ui.button(label).clicked() {
+                                        g.expanded = !g.expanded;
+                                    }
                                 }
                             });
                             ui.separator();
@@ -378,9 +443,9 @@ impl People {
                     });
             });
         // Only one change per frame: indices into `groups` are stale after the first one.
-        let result = match (name, remove) {
+        let result = match (name, moved) {
             (Some(gi), _) => self.name_group(base, gi),
-            (None, Some((gi, fi))) => self.remove_face(base, gi, fi),
+            (None, Some((gi, fi, person))) => self.move_face(base, gi, fi, person),
             _ => Ok(()),
         };
         if let Err(e) = result {

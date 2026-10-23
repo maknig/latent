@@ -195,6 +195,27 @@ pub fn face_crop_path(base: &Path, image: &str, index: usize) -> std::path::Path
         .join(format!("{}_{index}.png", image.replace(['/', '\\'], "_")))
 }
 
+/// Writes the aligned crops of the faces of `image` to `face_crop_path` and returns the faces without them.
+pub fn save_crops(
+    base: &Path,
+    image: &str,
+    found: Vec<(StoredFace, DynamicImage)>,
+) -> Vec<StoredFace> {
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(i, (face, crop))| {
+            let p = face_crop_path(base, image, i);
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            // The crop is only a thumbnail: a failed write must not fail the scan.
+            let _ = crop.save(&p);
+            face
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

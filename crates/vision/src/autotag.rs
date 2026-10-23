@@ -3,7 +3,7 @@
 //! - CLIP zero-shot scores of a vocabulary (`clip-image` + `clip-text` in `models/`).
 //!
 //! Embeddings are cached in `filmarchiv.vision.json` next to the data.
-use crate::{embed_faces, score_tags, suggest_from_neighbours, EmbeddingCache, FaceDetector, FaceStore, Model, OnnxModel, TextModel, FACE_MATCH};
+use crate::{embed_faces, save_crops, score_tags, suggest_from_neighbours, EmbeddingCache, FaceDetector, FaceStore, Model, OnnxModel, TextModel, FACE_MATCH};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -113,11 +113,8 @@ fn people(models: &Path, base: &Path, query: &str) -> Result<Vec<(String, f32)>,
             let detector = FaceDetector::load(&det).map_err(|e| e.to_string())?;
             let embedder = OnnxModel::load(&emb).map_err(|e| e.to_string())?;
             let img = image::open(&full).map_err(|e| format!("{query}: {e}"))?;
-            let faces: Vec<_> = embed_faces(&detector, &embedder, &img)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|(f, _)| f)
-                .collect();
+            let found = embed_faces(&detector, &embedder, &img).map_err(|e| e.to_string())?;
+            let faces = save_crops(base, query, found);
             store.set_faces(query, mtime, faces.clone());
             store.save(&store_path).map_err(|e| e.to_string())?;
             faces
