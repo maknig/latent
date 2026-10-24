@@ -87,10 +87,9 @@ fn cache_file(dir: &Path, path: &Path, size: u32) -> Option<PathBuf> {
     Some(dir.join(size.to_string()).join(format!("{:016x}.png", h.finish())))
 }
 
-/// Rotates the image file by `quarter_turns` clockwise (negative = counter-clockwise), keeping its format.
-/// The result is written to a temp file and renamed over the original; JPEGs are re-encoded (quality 95, no EXIF).
-pub fn rotate_file(path: &Path, quarter_turns: i32) -> Result<(), String> {
-    use image::{codecs::jpeg::JpegEncoder, ImageFormat};
+/// Format and lowercase extension of an editable image file (JPEG, PNG or TIFF).
+fn editable(path: &Path) -> Result<(image::ImageFormat, String), String> {
+    use image::ImageFormat;
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let format = match ext.as_str() {
         "jpg" | "jpeg" => ImageFormat::Jpeg,
@@ -98,13 +97,13 @@ pub fn rotate_file(path: &Path, quarter_turns: i32) -> Result<(), String> {
         "tif" | "tiff" => ImageFormat::Tiff,
         _ => return Err(format!("{}: unsupported format", path.display())),
     };
-    let im = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let im = match quarter_turns.rem_euclid(4) {
-        0 => return Ok(()),
-        1 => im.rotate90(),
-        2 => im.rotate180(),
-        _ => im.rotate270(),
-    };
+    Ok((format, ext))
+}
+
+/// Replaces the image file `path` with `im`, keeping its format.
+/// The result is written to a temp file and renamed over the original; JPEGs are re-encoded (quality 95, no EXIF).
+fn overwrite(path: &Path, im: &image::DynamicImage, format: image::ImageFormat, ext: &str) -> Result<(), String> {
+    use image::{codecs::jpeg::JpegEncoder, ImageFormat};
     let tmp = path.with_extension(format!("{ext}.tmp"));
     let saved = if format == ImageFormat::Jpeg {
         std::fs::File::create(&tmp)
@@ -117,6 +116,69 @@ pub fn rotate_file(path: &Path, quarter_turns: i32) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         format!("{}: {e}", path.display())
     })
+}
+
+/// Rotates the image file by `quarter_turns` clockwise (negative = counter-clockwise), keeping its format.
+pub fn rotate_file(path: &Path, quarter_turns: i32) -> Result<(), String> {
+    let (format, ext) = editable(path)?;
+    let im = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let im = match quarter_turns.rem_euclid(4) {
+        0 => return Ok(()),
+        1 => im.rotate90(),
+        2 => im.rotate180(),
+        _ => im.rotate270(),
+    };
+    overwrite(path, &im, format, &ext)
+}
+
+/// Crops the image file to `rect` = `[left, top, right, bottom]` as fractions (0..1) of its size.
+pub fn crop_file(path: &Path, rect: [f32; 4]) -> Result<(), String> {
+    let (format, ext) = editable(path)?;
+    let im = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (w, h) = (im.width() as f32, im.height() as f32);
+    let edge = |f: f32, len: f32| (f.clamp(0.0, 1.0) * len).round() as u32;
+    let (x0, y0) = (edge(rect[0].min(rect[2]), w), edge(rect[1].min(rect[3]), h));
+    let (x1, y1) = (edge(rect[0].max(rect[2]), w), edge(rect[1].max(rect[3]), h));
+    if x1 <= x0 || y1 <= y0 {
+        return Err("empty crop".into());
+    }
+    if (x1 - x0, y1 - y0) == (im.width(), im.height()) {
+        return Ok(());
+    }
+    overwrite(path, &im.crop_imm(x0, y0, x1 - x0, y1 - y0), format, &ext)
+}
+
+/// Where the untouched original of `path` is kept: `<archive>/.originals/<path relative to the archive>`.
+fn original_path(archive: &Path, path: &Path) -> Result<PathBuf, String> {
+    let rel = path.strip_prefix(archive).map_err(|_| format!("{}: outside the archive", path.display()))?;
+    Ok(archive.join(".originals").join(rel))
+}
+
+/// Whether a backup of the original of `path` exists.
+pub fn has_original(archive: &Path, path: &Path) -> bool {
+    original_path(archive, path).is_ok_and(|o| o.exists())
+}
+
+/// Copies `path` to `.originals` before the first destructive edit; an existing backup is kept.
+pub fn backup_original(archive: &Path, path: &Path) -> Result<(), String> {
+    let o = original_path(archive, path)?;
+    if o.exists() {
+        return Ok(());
+    }
+    let err = |e: std::io::Error| format!("backup {}: {e}", path.display());
+    std::fs::create_dir_all(o.parent().unwrap_or(archive)).map_err(err)?;
+    std::fs::copy(path, &o).map(|_| ()).map_err(err)
+}
+
+/// Puts the backed-up original back over `path` and removes the backup.
+pub fn restore_original(archive: &Path, path: &Path) -> Result<(), String> {
+    let o = original_path(archive, path)?;
+    let err = |e: std::io::Error| format!("restore {}: {e}", path.display());
+    let tmp = path.with_extension("restore.tmp");
+    std::fs::copy(&o, &tmp).map_err(err)?;
+    std::fs::rename(&tmp, path).map_err(err)?;
+    let _ = std::fs::remove_file(&o);
+    Ok(())
 }
 
 fn to_color_image(im: &image::RgbaImage) -> egui::ColorImage {
@@ -357,6 +419,32 @@ mod tests {
             assert!(!p.with_extension(format!("{}.tmp", name.rsplit('.').next().unwrap())).exists());
         }
         assert!(rotate_file(&dir.join("a.gif"), 1).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn crop_and_restore() {
+        let dir = std::env::temp_dir().join(format!("fa-crop-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        for name in ["a.png", "a.jpg"] {
+            let p = dir.join("images").join(name);
+            let mut im = image::RgbImage::new(10, 10);
+            im.put_pixel(5, 5, image::Rgb([255, 255, 255]));
+            im.save(&p).unwrap();
+            assert!(!has_original(&dir, &p));
+            backup_original(&dir, &p).unwrap();
+            crop_file(&p, [0.5, 0.5, 1.0, 1.0]).unwrap();
+            let r = image::open(&p).unwrap().to_rgb8();
+            assert_eq!((r.width(), r.height()), (5, 5), "{name}");
+            assert!(r.get_pixel(0, 0)[0] > 200, "{name}");
+            // a second backup keeps the first original
+            backup_original(&dir, &p).unwrap();
+            assert!(has_original(&dir, &p));
+            restore_original(&dir, &p).unwrap();
+            assert_eq!(image::open(&p).unwrap().width(), 10, "{name}");
+            assert!(!has_original(&dir, &p));
+            assert!(crop_file(&p, [0.5, 0.5, 0.5, 0.9]).is_err());
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

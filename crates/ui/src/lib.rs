@@ -43,12 +43,115 @@ struct Preview {
     dir: i32,
     /// Height of the side column in the previous frame; the image viewport follows it.
     side_h: f32,
+    /// Crop mode: `[left, top, right, bottom]` as fractions of the image.
+    crop: Option<[f32; 4]>,
+    grab: Option<Grab>,
+}
+
+/// What a crop drag moves: a new rectangle from an anchor, the edges flagged `[left, top, right, bottom]`, or the whole rectangle.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+enum Grab {
+    New(egui::Pos2),
+    Edges([bool; 4]),
+    Move,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Preview {
     fn new(table: usize, row: u64, index: usize) -> Self {
-        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0 }
+        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0, crop: None, grab: None }
+    }
+}
+
+/// Handles a crop drag on the image at `rect` and paints the dimmed outside, outline and thirds.
+#[cfg(not(target_arch = "wasm32"))]
+fn crop_overlay(ui: &egui::Ui, resp: &egui::Response, painter: &egui::Painter, rect: egui::Rect, crop: &mut [f32; 4], grab: &mut Option<Grab>) {
+    const HIT: f32 = 10.0;
+    const MIN: f32 = 0.02;
+    let to_norm = |p: egui::Pos2| egui::pos2(((p.x - rect.min.x) / rect.width()).clamp(0.0, 1.0), ((p.y - rect.min.y) / rect.height()).clamp(0.0, 1.0));
+    let screen = |c: &[f32; 4]| egui::Rect::from_min_max(rect.min + egui::vec2(c[0] * rect.width(), c[1] * rect.height()), rect.min + egui::vec2(c[2] * rect.width(), c[3] * rect.height()));
+    let edges_at = |p: egui::Pos2, r: egui::Rect| -> Option<[bool; 4]> {
+        if !r.expand(HIT).contains(p) {
+            return None;
+        }
+        let e = [(p.x - r.left()).abs() < HIT, (p.y - r.top()).abs() < HIT, (p.x - r.right()).abs() < HIT, (p.y - r.bottom()).abs() < HIT];
+        // Only the nearer of two opposite edges when the rectangle is tiny.
+        let e = [e[0], e[1], e[2] && !e[0], e[3] && !e[1]];
+        e.iter().any(|&b| b).then_some(e)
+    };
+    let r = screen(crop);
+    if let (Some(p), None) = (resp.hover_pos(), *grab) {
+        ui.ctx().set_cursor_icon(match edges_at(p, r) {
+            Some([l, t, rt, b]) if (l || rt) && (t || b) => if l == t { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::ResizeNeSw },
+            Some([l, _, rt, _]) if l || rt => egui::CursorIcon::ResizeHorizontal,
+            Some(_) => egui::CursorIcon::ResizeVertical,
+            None if r.contains(p) => egui::CursorIcon::Move,
+            None => egui::CursorIcon::Crosshair,
+        });
+    }
+    if resp.drag_started() {
+        *grab = resp.interact_pointer_pos().map(|p| match edges_at(p, r) {
+            Some(e) => Grab::Edges(e),
+            None if r.contains(p) => Grab::Move,
+            None => Grab::New(to_norm(p)),
+        });
+    }
+    if resp.dragged() {
+        if let (Some(g), Some(p)) = (*grab, resp.interact_pointer_pos()) {
+            match g {
+                Grab::New(a) => {
+                    let b = to_norm(p);
+                    *crop = [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)];
+                }
+                Grab::Edges(e) => {
+                    let n = to_norm(p);
+                    for (i, &on) in e.iter().enumerate() {
+                        if on {
+                            crop[i] = if i % 2 == 0 { n.x } else { n.y };
+                        }
+                    }
+                    // Keep a minimum size and the right order by pushing the dragged edge back.
+                    if e[0] {
+                        crop[0] = crop[0].min(crop[2] - MIN);
+                    }
+                    if e[2] {
+                        crop[2] = crop[2].max(crop[0] + MIN);
+                    }
+                    if e[1] {
+                        crop[1] = crop[1].min(crop[3] - MIN);
+                    }
+                    if e[3] {
+                        crop[3] = crop[3].max(crop[1] + MIN);
+                    }
+                }
+                Grab::Move => {
+                    let d = resp.drag_delta() / rect.size();
+                    let dx = d.x.clamp(-crop[0], 1.0 - crop[2]);
+                    let dy = d.y.clamp(-crop[1], 1.0 - crop[3]);
+                    *crop = [crop[0] + dx, crop[1] + dy, crop[2] + dx, crop[3] + dy];
+                }
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        *grab = None;
+    }
+    let r = screen(crop);
+    let dim = egui::Color32::from_black_alpha(150);
+    painter.rect_filled(egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, r.top())), 0.0, dim);
+    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.min.x, r.bottom()), rect.max), 0.0, dim);
+    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.min.x, r.top()), egui::pos2(r.left(), r.bottom())), 0.0, dim);
+    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(r.right(), r.top()), egui::pos2(rect.max.x, r.bottom())), 0.0, dim);
+    let thin = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(70));
+    for i in 1..3 {
+        let f = i as f32 / 3.0;
+        painter.line_segment([egui::pos2(r.left() + f * r.width(), r.top()), egui::pos2(r.left() + f * r.width(), r.bottom())], thin);
+        painter.line_segment([egui::pos2(r.left(), r.top() + f * r.height()), egui::pos2(r.right(), r.top() + f * r.height())], thin);
+    }
+    painter.rect_stroke(r, 0.0, egui::Stroke::new(2.0_f32, egui::Color32::WHITE), egui::StrokeKind::Middle);
+    for c in [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom(), r.center_top(), r.center_bottom(), r.left_center(), r.right_center()] {
+        painter.rect_filled(egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0)), 1.0, ACCENT);
     }
 }
 
@@ -673,6 +776,32 @@ impl App {
         };
     }
 
+    /// Crops the image file `rel` to `rect` (fractions of its size), keeping the original in `.originals`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn crop_image(&mut self, rel: &str, rect: [f32; 4]) {
+        let full = self.resolve(rel);
+        self.status = match images::backup_original(&self.base_dir, &full).and_then(|()| images::crop_file(&full, rect)) {
+            Ok(()) => {
+                self.thumbs.invalidate(&full);
+                format!("Cropped {rel}")
+            }
+            Err(e) => format!("Crop failed: {e}"),
+        };
+    }
+
+    /// Puts back the original of the image file `rel`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restore_image(&mut self, rel: &str) {
+        let full = self.resolve(rel);
+        self.status = match images::restore_original(&self.base_dir, &full) {
+            Ok(()) => {
+                self.thumbs.invalidate(&full);
+                format!("Restored original of {rel}")
+            }
+            Err(e) => format!("Restore failed: {e}"),
+        };
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn image_strip(&mut self, ctx: &egui::Context) {
         if self.image_field().is_none() {
@@ -1063,6 +1192,8 @@ impl App {
         let searched = matches!(&self.tagger.result, Some((q, _)) if *q == rel);
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
         let mut rotate = 0;
+        let (mut apply_crop, mut restore) = (None::<[f32; 4]>, false);
+        let has_original = images::has_original(&self.base_dir, &full);
         let (mut open, mut commit) = (true, false);
         egui::Window::new(full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
             .id(egui::Id::new("image_preview_v2"))
@@ -1096,18 +1227,34 @@ impl App {
                     if ui.button("⟳").on_hover_text("Rotate right").clicked() {
                         rotate = 1;
                     }
+                    ui.separator();
+                    if pv.crop.is_none() {
+                        if ui.button("Crop").on_hover_text("Drag on the image to cut off borders").clicked() {
+                            pv.crop = Some([0.0, 0.0, 1.0, 1.0]);
+                        }
+                    } else {
+                        if ui.button("Apply crop").clicked() {
+                            apply_crop = pv.crop;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            pv.crop = None;
+                        }
+                    }
+                    if ui.add_enabled(has_original, egui::Button::new("Restore original")).on_hover_text("Undo crop and other edits").clicked() {
+                        restore = true;
+                    }
                 });
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui(view, |ui| {
-                        egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).show(ui, |ui| {
+                        egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).drag_to_scroll(pv.crop.is_none()).show(ui, |ui| {
                             let Some((id, s)) = tex else {
                                 ui.spinner();
                                 return;
                             };
                             let fit = (view.x / s.x).min(view.y / s.y) * 0.99;
                             let img = s * fit * pv.zoom;
-                            let (cell, resp) = ui.allocate_exact_size(img.max(view), egui::Sense::click());
+                            let (cell, resp) = ui.allocate_exact_size(img.max(view), egui::Sense::click_and_drag());
                             let rect = egui::Rect::from_center_size(cell.center(), img);
                             if resp.hovered() {
                                 let (z, wheel) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
@@ -1131,6 +1278,9 @@ impl App {
                                 if pv.white {
                                     annotate(&painter, rect, *white, "Weiss", true);
                                 }
+                            }
+                            if let Some(crop) = pv.crop.as_mut() {
+                                crop_overlay(ui, &resp, &painter, rect, crop, &mut pv.grab);
                             }
                             if loading {
                                 ui.put(egui::Rect::from_min_size(ui.clip_rect().min + egui::vec2(8.0, 8.0), egui::vec2(20.0, 20.0)), egui::Spinner::new());
@@ -1201,6 +1351,16 @@ impl App {
         }
         if rotate != 0 {
             self.rotate_image(&rel, rotate);
+            // A crop rectangle drawn before the turn no longer fits.
+            pv.crop = pv.crop.map(|_| [0.0, 0.0, 1.0, 1.0]);
+        }
+        if let Some(c) = apply_crop {
+            self.crop_image(&rel, c);
+            pv.crop = None;
+        }
+        if restore {
+            self.restore_image(&rel);
+            pv.crop = None;
         }
         if auto_tags {
             let tagged = self.tagged_images();
@@ -1216,6 +1376,7 @@ impl App {
             pv.index = (pv.index as i32 + step).clamp(0, paths.len() as i32 - 1) as usize;
             pv.dir = step;
             pv.zoom = 1.0;
+            pv.crop = None;
             ctx.request_repaint();
         }
         self.preview = Some(pv);
