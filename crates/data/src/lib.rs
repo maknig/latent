@@ -52,15 +52,33 @@ impl Value {
     }
 }
 
-/// Paths held by an `images` cell.
+/// Sort key of an image path: files with a number at the end of the name (`IMG_0012.jpg` -> 12)
+/// come first ordered by that number, then the others; ties are ordered by file name.
+fn image_sort_key(path: &str) -> (bool, u128, String) {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    let digits = stem.len() - stem.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let number = stem[stem.len() - digits..].parse::<u128>();
+    match number {
+        Ok(n) => (false, n, name.to_lowercase()),
+        Err(_) if digits > 0 => (false, u128::MAX, name.to_lowercase()),
+        Err(_) => (true, 0, name.to_lowercase()),
+    }
+}
+
+/// Paths held by an `images` cell, sorted by the number at the end of the file name.
 pub fn image_paths(v: &Value) -> Vec<String> {
     match v {
-        Value::Text(s) => s
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect(),
+        Value::Text(s) => {
+            let mut paths: Vec<String> = s
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            paths.sort_by_cached_key(|p| image_sort_key(p));
+            paths
+        }
         _ => vec![],
     }
 }
@@ -545,6 +563,22 @@ mod tests {
         let (_, d2) = s.save();
         assert!(d2.contains("\"b.png\""));
         assert_eq!(Store::load(sj, &d2).unwrap().0, s);
+    }
+
+    #[test]
+    fn image_paths_sorted_by_trailing_number() {
+        let sorted = |s: &str| image_paths(&Value::Text(s.into()));
+        assert_eq!(
+            sorted("d/img_10.jpg\nd/img_2.jpg\nd/img_1.tif"),
+            ["d/img_1.tif", "d/img_2.jpg", "d/img_10.jpg"]
+        );
+        // The number counts, not the prefix; names without a number come last.
+        assert_eq!(
+            sorted("z.jpg\nb_1.jpg\nA.jpg\na_2.jpg"),
+            ["b_1.jpg", "a_2.jpg", "A.jpg", "z.jpg"]
+        );
+        // Equal numbers: by file name. Directories are ignored.
+        assert_eq!(sorted("y/b-3.jpg\nx/a-3.jpg"), ["x/a-3.jpg", "y/b-3.jpg"]);
     }
 
     #[test]

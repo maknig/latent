@@ -19,6 +19,7 @@
           rust trunk wasm-bindgen-cli pkg-config openssl
           libxkbcommon libGL wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
           gtk3 glib
+          (python3.withPackages (ps: [ ps.pillow ]))
         ];
         LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
           libxkbcommon libGL wayland vulkan-loader xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr

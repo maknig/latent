@@ -14,6 +14,7 @@ const NEIGHBOURS: usize = 10;
 const CLIP_SCALE: f32 = 100.0;
 
 /// Common photo tags (German tag, English CLIP prompt), offered next to the archive's own tags.
+/// Used when the archive has no `default_tags.json`.
 pub const DEFAULT_TAGS: &[(&str, &str)] = &[
     ("Berge", "mountains"), ("Schnee", "snow"), ("See", "a lake"), ("Meer", "the sea"), ("Strand", "a beach"),
     ("Wald", "a forest"), ("Wiese", "a meadow"), ("Fluss", "a river"), ("Wasserfall", "a waterfall"), ("Himmel", "the sky"),
@@ -59,6 +60,21 @@ pub fn find_kind(dir: &Path, kind: Option<&str>) -> Option<PathBuf> {
 /// Optional `tag_prompts.json`: tag -> English prompt for CLIP; overrides the built-in prompts.
 fn aliases(base: &Path) -> HashMap<String, String> {
     std::fs::read(base.join("tag_prompts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// The default vocabulary (German tag, English CLIP prompt): `default_tags.json` in the archive
+/// (`[{"tag": "Berge", "prompt": "mountains"}]`, made by `scripts/vlm_tags.py`), else `DEFAULT_TAGS`.
+fn default_tags(base: &Path) -> Vec<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        tag: String,
+        prompt: String,
+    }
+    let custom: Vec<Entry> = std::fs::read(base.join("default_tags.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    if custom.is_empty() {
+        return DEFAULT_TAGS.iter().map(|(t, e)| (t.to_string(), e.to_string())).collect();
+    }
+    custom.into_iter().map(|e| (e.tag, e.prompt)).collect()
 }
 
 fn neighbours(models: &Path, base: &Path, cache: &mut EmbeddingCache, query: &str, tagged: &[(String, Vec<String>)]) -> Result<Vec<(String, f32)>, String> {
@@ -157,12 +173,12 @@ pub fn suggest(base: &Path, query: &str, tagged: &[(String, Vec<String>)]) -> Re
     let cache_path = base.join("filmarchiv.vision.json");
     let mut cache = EmbeddingCache::load(&cache_path);
     let prompts = aliases(base);
-    // Vocabulary: the archive's tags first, then the built-in ones; first spelling wins.
+    // Vocabulary: the archive's tags first, then the default ones; first spelling wins.
     let mut vocabulary: Vec<(String, String)> = vec![];
     let known = |v: &[(String, String)], tag: &str| v.iter().any(|(t, _)| t.to_lowercase() == tag.to_lowercase());
     let own = tagged.iter().flat_map(|(_, t)| t.iter().map(|t| (t.clone(), None)));
-    let builtin = DEFAULT_TAGS.iter().map(|(t, e)| (t.to_string(), Some(e.to_string())));
-    for (tag, builtin_prompt) in own.chain(builtin) {
+    let defaults = default_tags(base).into_iter().map(|(t, e)| (t, Some(e)));
+    for (tag, builtin_prompt) in own.chain(defaults) {
         if !known(&vocabulary, &tag) {
             let english = prompts.get(&tag).cloned().or(builtin_prompt).unwrap_or_else(|| tag.clone());
             vocabulary.push((tag, english));
@@ -173,4 +189,28 @@ pub fn suggest(base: &Path, query: &str, tagged: &[(String, Vec<String>)]) -> Re
     cache.save(&cache_path).map_err(|e| e.to_string())?;
     let names = people(&models, base, query)?;
     Ok(merge(merge(near, by_clip), names))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_archive(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fa-autotag-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn default_tags_file_replaces_builtin() {
+        let dir = temp_archive("file");
+        assert_eq!(default_tags(&dir).len(), DEFAULT_TAGS.len());
+        std::fs::write(dir.join("default_tags.json"), r#"[{"tag":"Berge","prompt":"mountains"}]"#).unwrap();
+        assert_eq!(default_tags(&dir), vec![("Berge".to_string(), "mountains".to_string())]);
+        std::fs::write(dir.join("default_tags.json"), "[]").unwrap();
+        assert_eq!(default_tags(&dir).len(), DEFAULT_TAGS.len());
+        std::fs::write(dir.join("default_tags.json"), "not json").unwrap();
+        assert_eq!(default_tags(&dir).len(), DEFAULT_TAGS.len());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

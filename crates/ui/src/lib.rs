@@ -660,6 +660,19 @@ impl App {
         out
     }
 
+    /// Rotates the image file `rel` by `turns` quarter turns (clockwise) and reloads its thumbnails.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn rotate_image(&mut self, rel: &str, turns: i32) {
+        let full = self.resolve(rel);
+        self.status = match images::rotate_file(&full, turns) {
+            Ok(()) => {
+                self.thumbs.invalidate(&full);
+                format!("Rotated {rel}")
+            }
+            Err(e) => format!("Rotate failed: {e}"),
+        };
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn image_strip(&mut self, ctx: &egui::Context) {
         if self.image_field().is_none() {
@@ -674,6 +687,7 @@ impl App {
         let linkable = self.engine.store.schema.tables[self.table].role == Some(TableRole::Film) && self.enlargement_target().is_some();
         let counts: Vec<usize> = paths.iter().map(|p| if linkable { fa_data::enlargements_for(&self.engine.store, p).len() } else { 0 }).collect();
         let (mut new_enl, mut show_enl, mut find_similar) = (None, None, None);
+        let mut rotate: Option<(String, i32)> = None;
         egui::TopBottomPanel::bottom("images").resizable(true).default_height(150.0).min_height(60.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Images").strong());
@@ -726,6 +740,14 @@ impl App {
                                 find_similar = Some(p.clone());
                                 ui.close_menu();
                             }
+                            if ui.button("Rotate left").clicked() {
+                                rotate = Some((p.clone(), -1));
+                                ui.close_menu();
+                            }
+                            if ui.button("Rotate right").clicked() {
+                                rotate = Some((p.clone(), 1));
+                                ui.close_menu();
+                            }
                             if !is_source && ui.button("Remove").clicked() {
                                 remove = Some(n - skip);
                                 ui.close_menu();
@@ -741,6 +763,9 @@ impl App {
         if let Some(p) = new_enl {
             self.new_enlargement(p);
             return;
+        }
+        if let Some((p, turns)) = rotate {
+            self.rotate_image(&p, turns);
         }
         if let Some(q) = find_similar {
             let all = self.all_image_paths();
@@ -1037,6 +1062,7 @@ impl App {
         let (running, tag_error) = (self.tagger.running, self.tagger.error.clone());
         let searched = matches!(&self.tagger.result, Some((q, _)) if *q == rel);
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
+        let mut rotate = 0;
         let (mut open, mut commit) = (true, false);
         egui::Window::new(full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
             .id(egui::Id::new("image_preview_v2"))
@@ -1063,6 +1089,13 @@ impl App {
                         pv.zoom = (pv.zoom * 1.25).min(3.0);
                     }
                     ui.weak(format!("{:.0}%", pv.zoom * 100.0));
+                    ui.separator();
+                    if ui.button("⟲").on_hover_text("Rotate left").clicked() {
+                        rotate = -1;
+                    }
+                    if ui.button("⟳").on_hover_text("Rotate right").clicked() {
+                        rotate = 1;
+                    }
                 });
                 ui.separator();
                 ui.horizontal_top(|ui| {
@@ -1165,6 +1198,9 @@ impl App {
             let sep = if pv.tags.trim().is_empty() { "" } else if pv.tags.trim_end().ends_with(',') { " " } else { ", " };
             pv.tags = format!("{}{sep}{t}", pv.tags.trim_end());
             commit = true;
+        }
+        if rotate != 0 {
+            self.rotate_image(&rel, rotate);
         }
         if auto_tags {
             let tagged = self.tagged_images();

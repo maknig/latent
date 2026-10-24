@@ -87,6 +87,38 @@ fn cache_file(dir: &Path, path: &Path, size: u32) -> Option<PathBuf> {
     Some(dir.join(size.to_string()).join(format!("{:016x}.png", h.finish())))
 }
 
+/// Rotates the image file by `quarter_turns` clockwise (negative = counter-clockwise), keeping its format.
+/// The result is written to a temp file and renamed over the original; JPEGs are re-encoded (quality 95, no EXIF).
+pub fn rotate_file(path: &Path, quarter_turns: i32) -> Result<(), String> {
+    use image::{codecs::jpeg::JpegEncoder, ImageFormat};
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let format = match ext.as_str() {
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "png" => ImageFormat::Png,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        _ => return Err(format!("{}: unsupported format", path.display())),
+    };
+    let im = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let im = match quarter_turns.rem_euclid(4) {
+        0 => return Ok(()),
+        1 => im.rotate90(),
+        2 => im.rotate180(),
+        _ => im.rotate270(),
+    };
+    let tmp = path.with_extension(format!("{ext}.tmp"));
+    let saved = if format == ImageFormat::Jpeg {
+        std::fs::File::create(&tmp)
+            .map_err(|e| e.to_string())
+            .and_then(|f| im.to_rgb8().write_with_encoder(JpegEncoder::new_with_quality(std::io::BufWriter::new(f), 95)).map_err(|e| e.to_string()))
+    } else {
+        im.save_with_format(&tmp, format).map_err(|e| e.to_string())
+    };
+    saved.and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string())).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })
+}
+
 fn to_color_image(im: &image::RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied([im.width() as usize, im.height() as usize], im.as_raw())
 }
@@ -187,6 +219,11 @@ impl Thumbs {
     /// Retry images that failed to load (call after files were added).
     pub fn forget_missing(&mut self) {
         self.map.retain(|_, e| !matches!(e.thumb, Thumb::Missing));
+    }
+
+    /// Drops the loaded thumbnails of `path` (all sizes) so they are decoded again, e.g. after the file changed.
+    pub fn invalidate(&mut self, path: &Path) {
+        self.map.retain(|k, _| k.0 != path);
     }
 
     fn evict(&mut self) {
@@ -298,6 +335,29 @@ mod tests {
         let r = crop_uv(egui::vec2(300.0, 100.0), egui::vec2(130.0, 100.0));
         assert!((r.min.y - 0.0).abs() < 1e-6 && (r.max.y - 1.0).abs() < 1e-6);
         assert!((r.center().x - 0.5).abs() < 1e-6 && r.width() < 1.0);
+    }
+
+    #[test]
+    fn rotate_file_turns_pixels() {
+        let dir = std::env::temp_dir().join(format!("fa-rotate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.png", "a.jpg", "a.tif"] {
+            let p = dir.join(name);
+            let mut im = image::RgbImage::new(2, 1);
+            im.put_pixel(0, 0, image::Rgb([255, 255, 255]));
+            im.save(&p).unwrap();
+            rotate_file(&p, 1).unwrap();
+            let r = image::open(&p).unwrap().to_rgb8();
+            assert_eq!((r.width(), r.height()), (1, 2), "{name}");
+            // the first pixel moved from the left to the top
+            assert!(r.get_pixel(0, 0)[0] > 200 && r.get_pixel(0, 1)[0] < 50, "{name}");
+            rotate_file(&p, -1).unwrap();
+            assert_eq!(image::open(&p).unwrap().width(), 2, "{name}");
+            rotate_file(&p, 4).unwrap();
+            assert!(!p.with_extension(format!("{}.tmp", name.rsplit('.').next().unwrap())).exists());
+        }
+        assert!(rotate_file(&dir.join("a.gif"), 1).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
