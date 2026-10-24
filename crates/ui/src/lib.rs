@@ -49,6 +49,9 @@ struct Preview {
     /// Dust mode: the spots marked so far, and the brush radius as a fraction of the image width.
     heal: Option<Vec<images::Spot>>,
     brush: f32,
+    /// Scroll offset of the image viewport, and the viewport rect plus whether the pointer was over it in the last frame.
+    pan: egui::Vec2,
+    view: Option<(egui::Rect, bool)>,
 }
 
 /// What a crop drag moves: a new rectangle from an anchor, the edges flagged `[left, top, right, bottom]`, or the whole rectangle.
@@ -63,8 +66,32 @@ enum Grab {
 #[cfg(not(target_arch = "wasm32"))]
 impl Preview {
     fn new(table: usize, row: u64, index: usize) -> Self {
-        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0, crop: None, grab: None, heal: None, brush: 0.006 }
+        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0, crop: None, grab: None, heal: None, brush: 0.006, pan: egui::Vec2::ZERO, view: None }
     }
+}
+
+/// Screen position of the image's top-left corner: the cell starts at the viewport minus the scroll offset and the image is centred in it.
+#[cfg(not(target_arch = "wasm32"))]
+fn image_min(view_min: egui::Pos2, view: egui::Vec2, pan: egui::Vec2, img: egui::Vec2) -> egui::Pos2 {
+    view_min - pan + (img.max(view) - img) / 2.0
+}
+
+/// Scroll offset that keeps the image point under `pointer` fixed when the image size changes from `old` to `new`.
+#[cfg(not(target_arch = "wasm32"))]
+fn zoom_pan(view_min: egui::Pos2, view: egui::Vec2, pan: egui::Vec2, old: egui::Vec2, new: egui::Vec2, pointer: egui::Pos2) -> egui::Vec2 {
+    let uv = ((pointer - image_min(view_min, view, pan, old)) / old).clamp(egui::Vec2::ZERO, egui::Vec2::splat(1.0));
+    let wanted = view_min.to_vec2() + (new.max(view) - new) / 2.0 + uv * new - pointer.to_vec2();
+    wanted.clamp(egui::Vec2::ZERO, new.max(view) - view)
+}
+
+/// Sets the zoom of the open image; `base` is the image size at zoom 1. The point under `anchor` (default: the viewport centre) stays put.
+#[cfg(not(target_arch = "wasm32"))]
+fn zoom_at(pv: &mut Preview, base: Option<egui::Vec2>, view: egui::Vec2, zoom: f32, anchor: Option<egui::Pos2>) {
+    if let (Some(base), Some((vr, _))) = (base, pv.view) {
+        let anchor = anchor.unwrap_or_else(|| vr.center());
+        pv.pan = zoom_pan(vr.min, view, pv.pan, base * pv.zoom, base * zoom, anchor);
+    }
+    pv.zoom = zoom;
 }
 
 /// Marks dust spots by clicking or dragging over the image at `rect`; draws the marked spots and the brush.
@@ -1232,6 +1259,7 @@ impl App {
         let (running, tag_error) = (self.tagger.running, self.tagger.error.clone());
         let searched = matches!(&self.tagger.result, Some((q, _)) if *q == rel);
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
+        let base = tex.map(|(_, s)| s * ((view.x / s.x).min(view.y / s.y) * 0.99));
         let mut rotate = 0;
         let (mut apply_crop, mut restore) = (None::<[f32; 4]>, false);
         let mut apply_heal = None::<Vec<images::Spot>>;
@@ -1252,14 +1280,17 @@ impl App {
                         step = 1;
                     }
                     ui.separator();
-                    if ui.add_enabled(pv.zoom > 0.34, egui::Button::new("verkleinern")).clicked() {
-                        pv.zoom = (pv.zoom * 0.8).max(0.333);
+                    if ui.add_enabled(pv.zoom > 0.34, egui::Button::new("Zoom out")).clicked() {
+                        let z = (pv.zoom * 0.8).max(0.333);
+                        zoom_at(&mut pv, base, view, z, None);
                     }
-                    if ui.button("anpassen").clicked() {
+                    if ui.button("Fit").clicked() {
                         pv.zoom = 1.0;
+                        pv.pan = egui::Vec2::ZERO;
                     }
-                    if ui.add_enabled(pv.zoom < 2.99, egui::Button::new("vergrössern")).clicked() {
-                        pv.zoom = (pv.zoom * 1.25).min(3.0);
+                    if ui.add_enabled(pv.zoom < 2.99, egui::Button::new("Zoom in")).clicked() {
+                        let z = (pv.zoom * 1.25).min(3.0);
+                        zoom_at(&mut pv, base, view, z, None);
                     }
                     ui.weak(format!("{:.0}%", pv.zoom * 100.0));
                     ui.separator();
@@ -1304,7 +1335,20 @@ impl App {
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui(view, |ui| {
-                        egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).drag_to_scroll(pv.crop.is_none() && pv.heal.is_none()).show(ui, |ui| {
+                        // Wheel and pinch zoom around the pointer. This runs before the image is laid out, using the viewport of the last frame.
+                        if let (Some((_, true)), Some(p)) = (pv.view, ctx.input(|i| i.pointer.hover_pos())) {
+                            let (z, wheel) = ctx.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
+                            let z = z * (wheel * 0.002).exp();
+                            if z != 1.0 {
+                                let zoom = (pv.zoom * z).clamp(0.333, 3.0);
+                                zoom_at(&mut pv, base, view, zoom, Some(p));
+                            }
+                            if wheel != 0.0 {
+                                ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                            }
+                        }
+                        let mut hovered = false;
+                        let out = egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).drag_to_scroll(false).scroll_offset(pv.pan).show(ui, |ui| {
                             let Some((id, s)) = tex else {
                                 ui.spinner();
                                 return;
@@ -1313,27 +1357,28 @@ impl App {
                             let img = s * fit * pv.zoom;
                             let (cell, resp) = ui.allocate_exact_size(img.max(view), egui::Sense::click_and_drag());
                             let rect = egui::Rect::from_center_size(cell.center(), img);
-                            if resp.hovered() {
-                                let (z, wheel) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
-                                let z = z * (wheel * 0.002).exp();
-                                if z != 1.0 {
-                                    pv.zoom = (pv.zoom * z).clamp(0.333, 3.0);
-                                }
-                                if wheel != 0.0 {
-                                    ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                            hovered = resp.hovered();
+                            if pv.crop.is_none() && pv.heal.is_none() {
+                                // Grab the image and drag it around.
+                                if resp.dragged() {
+                                    ui.scroll_with_delta(resp.drag_delta());
+                                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                                } else if hovered && (img.x > view.x || img.y > view.y) {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
                                 }
                             }
                             if resp.double_clicked() {
                                 pv.zoom = 1.0;
+                                pv.pan = egui::Vec2::ZERO;
                             }
                             let painter = ui.painter_at(rect.intersect(ui.clip_rect()));
                             painter.image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                             if let Some((_, black, white)) = &stats {
                                 if pv.black {
-                                    annotate(&painter, rect, *black, "Schwarz", false);
+                                    annotate(&painter, rect, *black, "Black", false);
                                 }
                                 if pv.white {
-                                    annotate(&painter, rect, *white, "Weiss", true);
+                                    annotate(&painter, rect, *white, "White", true);
                                 }
                             }
                             if let Some(crop) = pv.crop.as_mut() {
@@ -1346,6 +1391,9 @@ impl App {
                                 ui.put(egui::Rect::from_min_size(ui.clip_rect().min + egui::vec2(8.0, 8.0), egui::vec2(20.0, 20.0)), egui::Spinner::new());
                             }
                         });
+                        // Double-click resets the pan above; the scroll area's own offset follows in the next frame.
+                        pv.pan = if pv.zoom == 1.0 { egui::Vec2::ZERO } else { out.state.offset };
+                        pv.view = Some((out.inner_rect, hovered));
                     });
                     let side = ui.vertical(|ui| {
                         ui.set_width(SIDE);
@@ -1366,8 +1414,8 @@ impl App {
                             }
                         }
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut pv.black, "Schwarz");
-                            ui.checkbox(&mut pv.white, "Weiss");
+                            ui.checkbox(&mut pv.black, "Black");
+                            ui.checkbox(&mut pv.white, "White");
                         });
                         ui.add_space(8.0);
                         ui.label("Tags");
@@ -1442,6 +1490,7 @@ impl App {
             pv.index = (pv.index as i32 + step).clamp(0, paths.len() as i32 - 1) as usize;
             pv.dir = step;
             pv.zoom = 1.0;
+            pv.pan = egui::Vec2::ZERO;
             pv.crop = None;
             pv.heal = None;
             ctx.request_repaint();
@@ -1835,5 +1884,36 @@ impl eframe::App for App {
         {
             self.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use eframe::egui::{pos2, vec2};
+
+    #[test]
+    fn zoom_keeps_the_point_under_the_pointer() {
+        let (view_min, view) = (pos2(10.0, 20.0), vec2(400.0, 300.0));
+        let old = vec2(800.0, 600.0);
+        let pan = vec2(120.0, 90.0);
+        let pointer = pos2(250.0, 140.0);
+        let before = (pointer - image_min(view_min, view, pan, old)) / old;
+        for k in [0.5_f32, 1.25, 2.0] {
+            let new = old * k;
+            let p = zoom_pan(view_min, view, pan, old, new, pointer);
+            let after = (pointer - image_min(view_min, view, p, new)) / new;
+            let unclamped = new.x > view.x + 2.0 * p.x.abs() && p.x > 0.0 && p.y > 0.0 && p.x < new.x - view.x && p.y < new.y - view.y;
+            if unclamped {
+                assert!((after - before).length() < 1e-4, "k={k}: {before:?} vs {after:?}");
+            }
+            assert!(p.x >= 0.0 && p.y >= 0.0 && p.x <= (new.x - view.x).max(0.0) && p.y <= (new.y - view.y).max(0.0));
+        }
+    }
+
+    #[test]
+    fn zoom_out_to_a_small_image_resets_the_pan() {
+        let p = zoom_pan(pos2(0.0, 0.0), vec2(400.0, 300.0), vec2(50.0, 50.0), vec2(800.0, 600.0), vec2(300.0, 200.0), pos2(100.0, 100.0));
+        assert_eq!(p, vec2(0.0, 0.0));
     }
 }
