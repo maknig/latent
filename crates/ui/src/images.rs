@@ -148,6 +148,69 @@ pub fn crop_file(path: &Path, rect: [f32; 4]) -> Result<(), String> {
     overwrite(path, &im.crop_imm(x0, y0, x1 - x0, y1 - y0), format, &ext)
 }
 
+/// A spot to heal: centre as fractions of the image width and height, radius as a fraction of the width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spot {
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+}
+
+/// Fills each spot with the per-channel median of a ring of pixels around it, feathered at the edge.
+/// The median ignores neighbouring specks, so dust and short scratch strokes disappear.
+fn heal(im: &mut image::RgbImage, spots: &[Spot]) {
+    const ANGLES: usize = 24;
+    const FEATHER: f32 = 1.2;
+    let (w, h) = (im.width() as i64, im.height() as i64);
+    for s in spots {
+        let (cx, cy, r) = (s.x * w as f32, s.y * h as f32, (s.r * w as f32).max(1.0));
+        let mut samples: [Vec<u8>; 3] = Default::default();
+        for ring in [1.4_f32, 1.7, 2.0] {
+            for a in 0..ANGLES {
+                let t = (a as f32 + ring) / ANGLES as f32 * std::f32::consts::TAU;
+                let (x, y) = ((cx + t.cos() * r * ring).round() as i64, (cy + t.sin() * r * ring).round() as i64);
+                if (0..w).contains(&x) && (0..h).contains(&y) {
+                    let p = im.get_pixel(x as u32, y as u32);
+                    for c in 0..3 {
+                        samples[c].push(p[c]);
+                    }
+                }
+            }
+        }
+        if samples[0].len() < 8 {
+            continue;
+        }
+        let fill: Vec<f32> = samples.iter_mut().map(|v| {
+            v.sort_unstable();
+            v[v.len() / 2] as f32
+        }).collect();
+        let reach = r * FEATHER;
+        for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h - 1) {
+            for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1) {
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let a = ((reach - d) / (reach - r)).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    let p = im.get_pixel_mut(x as u32, y as u32);
+                    for c in 0..3 {
+                        p[c] = (p[c] as f32 * (1.0 - a) + fill[c] * a).round() as u8;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Removes dust and scratch spots from the image file (8 bits per channel afterwards).
+pub fn heal_file(path: &Path, spots: &[Spot]) -> Result<(), String> {
+    let (format, ext) = editable(path)?;
+    if spots.is_empty() {
+        return Ok(());
+    }
+    let mut rgb = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?.to_rgb8();
+    heal(&mut rgb, spots);
+    overwrite(path, &image::DynamicImage::ImageRgb8(rgb), format, &ext)
+}
+
 /// Where the untouched original of `path` is kept: `<archive>/.originals/<path relative to the archive>`.
 fn original_path(archive: &Path, path: &Path) -> Result<PathBuf, String> {
     let rel = path.strip_prefix(archive).map_err(|_| format!("{}: outside the archive", path.display()))?;
@@ -446,6 +509,21 @@ mod tests {
             assert!(crop_file(&p, [0.5, 0.5, 0.5, 0.9]).is_err());
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn heal_removes_speck_and_keeps_rest() {
+        let mut im = image::RgbImage::from_pixel(100, 100, image::Rgb([100, 120, 140]));
+        for (x, y) in [(50, 50), (51, 50), (50, 51), (51, 51)] {
+            im.put_pixel(x, y, image::Rgb([255, 255, 255]));
+        }
+        im.put_pixel(5, 5, image::Rgb([0, 0, 0]));
+        heal(&mut im, &[Spot { x: 0.505, y: 0.505, r: 0.03 }]);
+        assert_eq!(im.get_pixel(50, 50).0, [100, 120, 140]);
+        assert_eq!(im.get_pixel(51, 51).0, [100, 120, 140]);
+        assert_eq!(im.get_pixel(5, 5).0, [0, 0, 0]);
+        // a spot at the corner has fewer samples but must not panic
+        heal(&mut im, &[Spot { x: 0.0, y: 0.0, r: 0.05 }, Spot { x: 1.0, y: 1.0, r: 0.5 }]);
     }
 
     #[test]

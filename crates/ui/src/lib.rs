@@ -46,6 +46,9 @@ struct Preview {
     /// Crop mode: `[left, top, right, bottom]` as fractions of the image.
     crop: Option<[f32; 4]>,
     grab: Option<Grab>,
+    /// Dust mode: the spots marked so far, and the brush radius as a fraction of the image width.
+    heal: Option<Vec<images::Spot>>,
+    brush: f32,
 }
 
 /// What a crop drag moves: a new rectangle from an anchor, the edges flagged `[left, top, right, bottom]`, or the whole rectangle.
@@ -60,7 +63,32 @@ enum Grab {
 #[cfg(not(target_arch = "wasm32"))]
 impl Preview {
     fn new(table: usize, row: u64, index: usize) -> Self {
-        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0, crop: None, grab: None }
+        Preview { table, row, index, loaded: None, tags: String::new(), location: String::new(), zoom: 1.0, black: false, white: false, shown: None, dir: 1, side_h: 0.0, crop: None, grab: None, heal: None, brush: 0.006 }
+    }
+}
+
+/// Marks dust spots by clicking or dragging over the image at `rect`; draws the marked spots and the brush.
+#[cfg(not(target_arch = "wasm32"))]
+fn heal_overlay(ui: &egui::Ui, resp: &egui::Response, painter: &egui::Painter, rect: egui::Rect, spots: &mut Vec<images::Spot>, brush: f32) {
+    let to_spot = |p: egui::Pos2| images::Spot { x: (p.x - rect.min.x) / rect.width(), y: (p.y - rect.min.y) / rect.height(), r: brush };
+    let radius = brush * rect.width();
+    let pos = resp.interact_pointer_pos().or(resp.hover_pos());
+    if let Some(p) = pos.filter(|p| rect.contains(*p)) {
+        let last = spots.last().map(|s| rect.min + egui::vec2(s.x * rect.width(), s.y * rect.height()));
+        let far = last.is_none_or(|l| l.distance(p) >= radius * 0.7);
+        if resp.drag_started() || resp.clicked() || (resp.dragged() && far) {
+            spots.push(to_spot(p));
+        }
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        if let Some(p) = resp.hover_pos() {
+            painter.circle_stroke(p, radius.max(2.0), egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
+        }
+    }
+    for s in spots.iter() {
+        let c = rect.min + egui::vec2(s.x * rect.width(), s.y * rect.height());
+        painter.circle_stroke(c, (s.r * rect.width()).max(2.0), egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(255, 80, 80)));
     }
 }
 
@@ -789,6 +817,19 @@ impl App {
         };
     }
 
+    /// Heals the marked dust `spots` in the image file `rel`, keeping the original in `.originals`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn heal_image(&mut self, rel: &str, spots: &[images::Spot]) {
+        let full = self.resolve(rel);
+        self.status = match images::backup_original(&self.base_dir, &full).and_then(|()| images::heal_file(&full, spots)) {
+            Ok(()) => {
+                self.thumbs.invalidate(&full);
+                format!("Removed {} spots from {rel}", spots.len())
+            }
+            Err(e) => format!("Dust removal failed: {e}"),
+        };
+    }
+
     /// Puts back the original of the image file `rel`.
     #[cfg(not(target_arch = "wasm32"))]
     fn restore_image(&mut self, rel: &str) {
@@ -1193,6 +1234,7 @@ impl App {
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
         let mut rotate = 0;
         let (mut apply_crop, mut restore) = (None::<[f32; 4]>, false);
+        let mut apply_heal = None::<Vec<images::Spot>>;
         let has_original = images::has_original(&self.base_dir, &full);
         let (mut open, mut commit) = (true, false);
         egui::Window::new(full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
@@ -1228,9 +1270,24 @@ impl App {
                         rotate = 1;
                     }
                     ui.separator();
-                    if pv.crop.is_none() {
+                    if pv.crop.is_none() && pv.heal.is_none() {
                         if ui.button("Crop").on_hover_text("Drag on the image to cut off borders").clicked() {
                             pv.crop = Some([0.0, 0.0, 1.0, 1.0]);
+                        }
+                        if ui.button("Dust").on_hover_text("Click or drag over dust and scratches to mark them").clicked() {
+                            pv.heal = Some(vec![]);
+                        }
+                    } else if let Some(spots) = pv.heal.as_mut() {
+                        ui.label("Size");
+                        ui.add(egui::Slider::new(&mut pv.brush, 0.002..=0.03).show_value(false));
+                        if ui.add_enabled(!spots.is_empty(), egui::Button::new("Undo")).clicked() {
+                            spots.pop();
+                        }
+                        if ui.add_enabled(!spots.is_empty(), egui::Button::new(format!("Remove dust ({})", spots.len()))).clicked() {
+                            apply_heal = Some(std::mem::take(spots));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            pv.heal = None;
                         }
                     } else {
                         if ui.button("Apply crop").clicked() {
@@ -1247,7 +1304,7 @@ impl App {
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui(view, |ui| {
-                        egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).drag_to_scroll(pv.crop.is_none()).show(ui, |ui| {
+                        egui::ScrollArea::both().id_salt(&rel).max_width(view.x).max_height(view.y).auto_shrink([false, false]).drag_to_scroll(pv.crop.is_none() && pv.heal.is_none()).show(ui, |ui| {
                             let Some((id, s)) = tex else {
                                 ui.spinner();
                                 return;
@@ -1281,6 +1338,9 @@ impl App {
                             }
                             if let Some(crop) = pv.crop.as_mut() {
                                 crop_overlay(ui, &resp, &painter, rect, crop, &mut pv.grab);
+                            }
+                            if let Some(spots) = pv.heal.as_mut() {
+                                heal_overlay(ui, &resp, &painter, rect, spots, pv.brush);
                             }
                             if loading {
                                 ui.put(egui::Rect::from_min_size(ui.clip_rect().min + egui::vec2(8.0, 8.0), egui::vec2(20.0, 20.0)), egui::Spinner::new());
@@ -1353,14 +1413,20 @@ impl App {
             self.rotate_image(&rel, rotate);
             // A crop rectangle drawn before the turn no longer fits.
             pv.crop = pv.crop.map(|_| [0.0, 0.0, 1.0, 1.0]);
+            pv.heal = pv.heal.map(|_| vec![]);
         }
         if let Some(c) = apply_crop {
             self.crop_image(&rel, c);
             pv.crop = None;
         }
+        if let Some(spots) = apply_heal {
+            self.heal_image(&rel, &spots);
+            pv.heal = None;
+        }
         if restore {
             self.restore_image(&rel);
             pv.crop = None;
+            pv.heal = None;
         }
         if auto_tags {
             let tagged = self.tagged_images();
@@ -1377,6 +1443,7 @@ impl App {
             pv.dir = step;
             pv.zoom = 1.0;
             pv.crop = None;
+            pv.heal = None;
             ctx.request_repaint();
         }
         self.preview = Some(pv);
