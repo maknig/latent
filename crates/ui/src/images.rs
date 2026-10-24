@@ -156,44 +156,170 @@ pub struct Spot {
     pub r: f32,
 }
 
-/// Fills each spot with the per-channel median of a ring of pixels around it, feathered at the edge.
-/// The median ignores neighbouring specks, so dust and short scratch strokes disappear.
-fn heal(im: &mut image::RgbImage, spots: &[Spot]) {
+/// Spots are blended over `FEATHER` x their radius, with a full-strength core.
+const FEATHER: f32 = 1.2;
+
+/// Pixels covered by any spot (including the feathered edge).
+fn spot_mask(w: u32, h: u32, spots: &[Spot]) -> Vec<bool> {
+    let mut mask = vec![false; (w * h) as usize];
+    for s in spots {
+        let (cx, cy, reach) = (s.x * w as f32, s.y * h as f32, (s.r * w as f32).max(1.0) * FEATHER);
+        for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h as i64 - 1) {
+            for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w as i64 - 1) {
+                if (x as f32 - cx).hypot(y as f32 - cy) <= reach {
+                    mask[(y as u32 * w + x as u32) as usize] = true;
+                }
+            }
+        }
+    }
+    mask
+}
+
+/// Per-channel median of a ring of pixels around the spot: the flat fallback when no texture can be copied.
+fn median_fill(im: &image::RgbImage, cx: f32, cy: f32, r: f32) -> Option<[f32; 3]> {
     const ANGLES: usize = 24;
-    const FEATHER: f32 = 1.2;
     let (w, h) = (im.width() as i64, im.height() as i64);
+    let mut samples: [Vec<u8>; 3] = Default::default();
+    for ring in [1.4_f32, 1.7, 2.0] {
+        for a in 0..ANGLES {
+            let t = (a as f32 + ring) / ANGLES as f32 * std::f32::consts::TAU;
+            let (x, y) = ((cx + t.cos() * r * ring).round() as i64, (cy + t.sin() * r * ring).round() as i64);
+            if (0..w).contains(&x) && (0..h).contains(&y) {
+                let p = im.get_pixel(x as u32, y as u32);
+                for c in 0..3 {
+                    samples[c].push(p[c]);
+                }
+            }
+        }
+    }
+    if samples[0].len() < 8 {
+        return None;
+    }
+    let mut fill = [0.0; 3];
+    for (f, v) in fill.iter_mut().zip(samples.iter_mut()) {
+        v.sort_unstable();
+        *f = v[v.len() / 2] as f32;
+    }
+    Some(fill)
+}
+
+/// Offsets (on a grid of `stride`) of the pixels whose distance from the centre is within `lo..=hi`.
+fn ring_offsets(lo: f32, hi: f32, stride: i64) -> Vec<(i64, i64)> {
+    let n = (hi / stride as f32).ceil() as i64;
+    let mut out = vec![];
+    for j in -n..=n {
+        for i in -n..=n {
+            let (x, y) = (i * stride, j * stride);
+            let d = (x as f32).hypot(y as f32);
+            if d >= lo && d <= hi {
+                out.push((x, y));
+            }
+        }
+    }
+    out
+}
+
+/// Offset `(dx, dy)` of the nearby area that looks most like the surroundings of the spot at `(cx, cy)`,
+/// and the per-channel mean difference (spot surroundings minus source) for matching brightness.
+/// `mask` marks pixels that must not be used (spots still to be healed).
+fn best_source(im: &image::RgbImage, mask: &[bool], cx: f32, cy: f32, r: f32) -> Option<((i64, i64), [f32; 3])> {
+    let (w, h) = (im.width() as i64, im.height() as i64);
+    let inner = r * FEATHER;
+    let outer = inner + (r * 0.6).max(3.0);
+    let stride = ((r / 6.0) as i64).max(1);
+    let usable = |x: i64, y: i64| (0..w).contains(&x) && (0..h).contains(&y) && !mask[(y * w + x) as usize];
+    let (px, py) = (cx.round() as i64, cy.round() as i64);
+    // Context: pixels around the spot that are themselves intact. Disc: what a candidate must supply.
+    let context: Vec<(i64, i64)> = ring_offsets(inner, outer, stride).into_iter().filter(|&(x, y)| usable(px + x, py + y)).collect();
+    if context.len() < 12 {
+        return None;
+    }
+    let disc = ring_offsets(0.0, inner, stride);
+    let min_d = 2.0 * outer;
+    let max_d = (8.0 * r).max(min_d + 8.0);
+    let step = ((r / 2.0) as i64).max(1);
+    let n = (max_d / step as f32).ceil() as i64;
+    let mut best: Option<(f64, (i64, i64))> = None;
+    for j in -n..=n {
+        for i in -n..=n {
+            let (dx, dy) = (i * step, j * step);
+            let dist = (dx as f32).hypot(dy as f32);
+            if dist < min_d || dist > max_d {
+                continue;
+            }
+            if !disc.iter().chain(&context).all(|&(x, y)| usable(px + dx + x, py + dy + y)) {
+                continue;
+            }
+            let mut ssd = 0.0_f64;
+            for &(x, y) in &context {
+                let (a, b) = (im.get_pixel((px + x) as u32, (py + y) as u32), im.get_pixel((px + dx + x) as u32, (py + dy + y) as u32));
+                for c in 0..3 {
+                    let d = a[c] as f64 - b[c] as f64;
+                    ssd += d * d;
+                }
+                if best.is_some_and(|(s, _)| ssd >= s) {
+                    break;
+                }
+            }
+            if best.is_none_or(|(s, _)| ssd < s) {
+                best = Some((ssd, (dx, dy)));
+            }
+        }
+    }
+    let (_, (dx, dy)) = best?;
+    let mut delta = [0.0_f32; 3];
+    for &(x, y) in &context {
+        let (a, b) = (im.get_pixel((px + x) as u32, (py + y) as u32), im.get_pixel((px + dx + x) as u32, (py + dy + y) as u32));
+        for c in 0..3 {
+            delta[c] += (a[c] as f32 - b[c] as f32) / context.len() as f32;
+        }
+    }
+    Some(((dx, dy), delta))
+}
+
+/// Heals each spot by copying the nearby texture that best continues its surroundings (grain included),
+/// feathered at the edge; falls back to a flat median fill where no such area exists.
+/// Spots are healed in order and later ones may use the healed pixels as context.
+fn heal(im: &mut image::RgbImage, spots: &[Spot]) {
+    let (w, h) = (im.width() as i64, im.height() as i64);
+    let mut mask = spot_mask(im.width(), im.height(), spots);
     for s in spots {
         let (cx, cy, r) = (s.x * w as f32, s.y * h as f32, (s.r * w as f32).max(1.0));
-        let mut samples: [Vec<u8>; 3] = Default::default();
-        for ring in [1.4_f32, 1.7, 2.0] {
-            for a in 0..ANGLES {
-                let t = (a as f32 + ring) / ANGLES as f32 * std::f32::consts::TAU;
-                let (x, y) = ((cx + t.cos() * r * ring).round() as i64, (cy + t.sin() * r * ring).round() as i64);
-                if (0..w).contains(&x) && (0..h).contains(&y) {
-                    let p = im.get_pixel(x as u32, y as u32);
+        let source = best_source(im, &mask, cx, cy, r);
+        let flat = if source.is_none() { median_fill(im, cx, cy, r) } else { None };
+        if source.is_some() || flat.is_some() {
+            let reach = r * FEATHER;
+            for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h - 1) {
+                for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1) {
+                    let a = ((reach - (x as f32 - cx).hypot(y as f32 - cy)) / (reach - r)).clamp(0.0, 1.0);
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let fill = match (source, flat) {
+                        (Some(((dx, dy), delta)), _) => {
+                            let (sx, sy) = (x + dx, y + dy);
+                            if !(0..w).contains(&sx) || !(0..h).contains(&sy) {
+                                continue;
+                            }
+                            let p = im.get_pixel(sx as u32, sy as u32);
+                            [p[0] as f32 + delta[0], p[1] as f32 + delta[1], p[2] as f32 + delta[2]]
+                        }
+                        (None, Some(f)) => f,
+                        _ => continue,
+                    };
+                    let p = im.get_pixel_mut(x as u32, y as u32);
                     for c in 0..3 {
-                        samples[c].push(p[c]);
+                        p[c] = (p[c] as f32 * (1.0 - a) + fill[c] * a).round().clamp(0.0, 255.0) as u8;
                     }
                 }
             }
         }
-        if samples[0].len() < 8 {
-            continue;
-        }
-        let fill: Vec<f32> = samples.iter_mut().map(|v| {
-            v.sort_unstable();
-            v[v.len() / 2] as f32
-        }).collect();
+        // The healed area is intact now and may serve as context for later spots.
         let reach = r * FEATHER;
         for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h - 1) {
             for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1) {
-                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
-                let a = ((reach - d) / (reach - r)).clamp(0.0, 1.0);
-                if a > 0.0 {
-                    let p = im.get_pixel_mut(x as u32, y as u32);
-                    for c in 0..3 {
-                        p[c] = (p[c] as f32 * (1.0 - a) + fill[c] * a).round() as u8;
-                    }
+                if (x as f32 - cx).hypot(y as f32 - cy) <= reach {
+                    mask[(y * w + x) as usize] = false;
                 }
             }
         }
@@ -509,6 +635,40 @@ mod tests {
             assert!(crop_file(&p, [0.5, 0.5, 0.5, 0.9]).is_err());
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn heal_copies_texture_instead_of_flat_fill() {
+        // Periodic grain: a flat fill would differ, the right nearby area reproduces it exactly.
+        let pattern = |x: u32, y: u32| {
+            let v = 40 + ((x * 3 + y * 5) % 7) as u8 * 25;
+            image::Rgb([v, v / 2 + 20, 255 - v])
+        };
+        let clean = image::RgbImage::from_fn(120, 120, pattern);
+        let mut im = clean.clone();
+        for y in 58..63 {
+            for x in 58..63 {
+                im.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        let spot = Spot { x: 60.0 / 120.0, y: 60.0 / 120.0, r: 0.05 };
+        heal(&mut im, &[spot]);
+        assert_eq!(im, clean);
+    }
+
+    #[test]
+    fn heal_does_not_copy_from_other_spots() {
+        let mut im = image::RgbImage::from_pixel(120, 120, image::Rgb([90, 90, 90]));
+        // two white blobs side by side: the second must not be used as the source for the first
+        for y in 55..66 {
+            for x in 30..42 {
+                im.put_pixel(x, y, image::Rgb([255, 255, 255]));
+                im.put_pixel(x + 24, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        let spots = [Spot { x: 36.0 / 120.0, y: 60.0 / 120.0, r: 0.07 }, Spot { x: 60.0 / 120.0, y: 60.0 / 120.0, r: 0.07 }];
+        heal(&mut im, &spots);
+        assert!(im.pixels().all(|p| p.0 == [90, 90, 90]));
     }
 
     #[test]
