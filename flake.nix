@@ -14,10 +14,10 @@
         extensions = [ "rust-src" "clippy" "rustfmt" ];
       };
       runtimeLibs = pkgs.lib.makeLibraryPath (with pkgs; [
-        libxkbcommon libGL wayland vulkan-loader xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
+        libxkbcommon libGL wayland vulkan-loader libx11 libxcursor libxi libxrandr
       ]);
       buildLibs = with pkgs; [
-        pkg-config openssl libxkbcommon libGL wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
+        pkg-config openssl libxkbcommon libGL wayland libx11 libxcursor libxi libxrandr
         gtk3 glib
       ];
       # Builds from the (read-only) flake source into a cache dir; no nix package because `ort`
