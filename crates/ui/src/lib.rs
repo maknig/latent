@@ -1418,6 +1418,9 @@ impl App {
                             ui.checkbox(&mut pv.white, "White");
                         });
                         ui.add_space(8.0);
+                        ui.label("Ort");
+                        commit |= ui.add(egui::TextEdit::singleline(&mut pv.location).desired_width(f32::INFINITY)).lost_focus();
+                        ui.add_space(4.0);
                         ui.label("Tags");
                         commit |= ui.add(egui::TextEdit::multiline(&mut pv.tags).desired_rows(3).desired_width(f32::INFINITY)).lost_focus();
                         let row_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
@@ -1441,9 +1444,6 @@ impl App {
                                 ui.colored_label(egui::Color32::LIGHT_RED, e);
                             }
                         });
-                        ui.add_space(4.0);
-                        ui.label("Ort");
-                        commit |= ui.add(egui::TextEdit::singleline(&mut pv.location).desired_width(f32::INFINITY)).lost_focus();
                     });
                     let h = side.response.rect.height();
                     if (h - pv.side_h).abs() > 1.0 {
