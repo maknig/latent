@@ -18,14 +18,18 @@ fn main() {
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
                     // Prefer the autosaved archive in localStorage, else the sample schema.
-                    let saved = cc.storage.and_then(|s| Some((s.get_string("schema")?, s.get_string("data")?)));
+                    let saved = cc
+                        .storage
+                        .and_then(|s| Some((s.get_string("schema")?, s.get_string("data")?)));
                     let store = saved
-                        .and_then(|(s, d)| fa_data::Store::load(&s, &d).ok().map(|x| x.0))
+                        .and_then(|(s, d)| latent_data::Store::load(&s, &d).ok().map(|x| x.0))
                         .unwrap_or_else(|| {
-                            let s = include_str!("../../../schemas/filmarchiv.json");
-                            fa_data::Store::new(fa_schema::Schema::from_json(s).expect("schema"))
+                            let s = include_str!("../../../schemas/latent.json");
+                            latent_data::Store::new(
+                                latent_schema::Schema::from_json(s).expect("schema"),
+                            )
                         });
-                    let mut app = fa_ui::App::new(store);
+                    let mut app = latent_ui::App::new(store);
                     app.persist = true;
                     Ok(Box::new(app))
                 }),

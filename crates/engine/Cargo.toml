@@ -1,8 +1,8 @@
 [package]
-name = "fa-engine"
+name = "latent-engine"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fa-schema = { path = "../schema" }
-fa-data = { path = "../data" }
+latent-schema = { path = "../schema" }
+latent-data = { path = "../data" }

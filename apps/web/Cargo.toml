@@ -1,12 +1,12 @@
 [package]
-name = "filmarchiv-web"
+name = "latent-web"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fa-ui = { path = "../../crates/ui" }
-fa-data = { path = "../../crates/data" }
-fa-schema = { path = "../../crates/schema" }
+latent-ui = { path = "../../crates/ui" }
+latent-data = { path = "../../crates/data" }
+latent-schema = { path = "../../crates/schema" }
 eframe = { version = "0.31", features = ["persistence"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

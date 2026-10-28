@@ -4,7 +4,7 @@
 //! works the same on native and wasm. Courier is monospaced, so text width is
 //! exact (as in the Qt original, which also printed in Courier).
 
-use fa_data::{format_value, Store};
+use latent_data::{format_value, Store};
 
 const A4: (f32, f32) = (595.28, 841.89);
 const MARGIN: f32 = 40.0;
@@ -28,15 +28,28 @@ pub struct PrintOpts {
 }
 
 /// Header labels and formatted cells for `ids` (in that order) and `cols`.
-pub fn table_rows(store: &Store, table: usize, ids: &[u64], cols: &[usize]) -> (Vec<String>, Vec<Vec<String>>) {
+pub fn table_rows(
+    store: &Store,
+    table: usize,
+    ids: &[u64],
+    cols: &[usize],
+) -> (Vec<String>, Vec<Vec<String>>) {
     let t = &store.schema.tables[table];
-    let headers = cols.iter().map(|&c| t.fields[c].label().to_string()).collect();
+    let headers = cols
+        .iter()
+        .map(|&c| t.fields[c].label().to_string())
+        .collect();
     let data = &store.tables[table];
-    let by_id: std::collections::HashMap<u64, &fa_data::Row> = data.rows.iter().map(|r| (r.id, r)).collect();
+    let by_id: std::collections::HashMap<u64, &latent_data::Row> =
+        data.rows.iter().map(|r| (r.id, r)).collect();
     let rows = ids
         .iter()
         .filter_map(|id| by_id.get(id))
-        .map(|r| cols.iter().map(|&c| format_value(&r.values[c], &t.fields[c])).collect())
+        .map(|r| {
+            cols.iter()
+                .map(|&c| format_value(&r.values[c], &t.fields[c]))
+                .collect()
+        })
         .collect();
     (headers, rows)
 }
@@ -49,13 +62,18 @@ struct Page {
 impl Page {
     fn text(&mut self, x: f32, y: f32, size: f32, bold: bool, s: &str) {
         let font = if bold { "F2" } else { "F1" };
-        self.ops.push_str(&format!("BT /{font} {size:.1} Tf {x:.2} {y:.2} Td ({}) Tj ET\n", pdf_escape(s)));
+        self.ops.push_str(&format!(
+            "BT /{font} {size:.1} Tf {x:.2} {y:.2} Td ({}) Tj ET\n",
+            pdf_escape(s)
+        ));
     }
     fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, w: f32) {
-        self.ops.push_str(&format!("{w:.2} w {x1:.2} {y1:.2} m {x2:.2} {y2:.2} l S\n"));
+        self.ops
+            .push_str(&format!("{w:.2} w {x1:.2} {y1:.2} m {x2:.2} {y2:.2} l S\n"));
     }
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, lw: f32) {
-        self.ops.push_str(&format!("{lw:.2} w {x:.2} {y:.2} {w:.2} {h:.2} re S\n"));
+        self.ops
+            .push_str(&format!("{lw:.2} w {x:.2} {y:.2} {w:.2} {h:.2} re S\n"));
     }
 }
 
@@ -114,12 +132,21 @@ fn page_size(landscape: bool) -> (f32, f32) {
     }
 }
 
-fn layout_table(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph): (f32, f32)) -> Vec<Page> {
+fn layout_table(
+    headers: &[String],
+    rows: &[Vec<String>],
+    title: &str,
+    (pw, ph): (f32, f32),
+) -> Vec<Page> {
     let avail = pw - 2.0 * MARGIN;
     let pad = 6.0;
     let mut widths: Vec<usize> = (0..headers.len())
         .map(|c| {
-            let longest = rows.iter().map(|r| r[c].lines().map(|l| l.chars().count()).max().unwrap_or(0)).max().unwrap_or(0);
+            let longest = rows
+                .iter()
+                .map(|r| r[c].lines().map(|l| l.chars().count()).max().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
             longest.max(headers[c].chars().count()).clamp(3, 40)
         })
         .collect();
@@ -130,7 +157,8 @@ fn layout_table(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph):
     }
     if total(&widths, fs) > avail {
         // Still too wide: shrink the columns proportionally; cells wrap.
-        let chars = ((avail - pad * widths.len() as f32) / (CHAR_W * fs)).max(widths.len() as f32 * 3.0);
+        let chars =
+            ((avail - pad * widths.len() as f32) / (CHAR_W * fs)).max(widths.len() as f32 * 3.0);
         let sum: usize = widths.iter().sum();
         let k = chars / sum as f32;
         for w in &mut widths {
@@ -160,7 +188,13 @@ fn layout_table(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph):
             *y -= 24.0;
         }
         for (c, h) in headers.iter().enumerate() {
-            p.text(col_x[c], *y - fs, fs, true, &h.chars().take(widths[c]).collect::<String>());
+            p.text(
+                col_x[c],
+                *y - fs,
+                fs,
+                true,
+                &h.chars().take(widths[c]).collect::<String>(),
+            );
         }
         *y -= lh + 2.0;
         p.line(MARGIN, *y, right, *y, 0.8);
@@ -169,7 +203,11 @@ fn layout_table(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph):
     };
     new_page(&mut pages, &mut y);
     for row in rows {
-        let cells: Vec<Vec<String>> = row.iter().enumerate().map(|(c, s)| wrap(s, widths[c])).collect();
+        let cells: Vec<Vec<String>> = row
+            .iter()
+            .enumerate()
+            .map(|(c, s)| wrap(s, widths[c]))
+            .collect();
         let n = cells.iter().map(Vec::len).max().unwrap_or(1);
         if y - n as f32 * lh < bottom {
             new_page(&mut pages, &mut y);
@@ -187,12 +225,22 @@ fn layout_table(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph):
     pages
 }
 
-fn layout_cards(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph): (f32, f32)) -> Vec<Page> {
+fn layout_cards(
+    headers: &[String],
+    rows: &[Vec<String>],
+    title: &str,
+    (pw, ph): (f32, f32),
+) -> Vec<Page> {
     let fs = 9.0;
     let lh = fs * 1.3;
     let pad = 6.0;
     let box_w = (pw - 2.0 * MARGIN).min(400.0);
-    let label_chars = headers.iter().map(|h| h.chars().count()).max().unwrap_or(0).clamp(4, 20);
+    let label_chars = headers
+        .iter()
+        .map(|h| h.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(4, 20);
     let value_x = MARGIN + pad + (label_chars + 2) as f32 * CHAR_W * fs;
     let value_chars = ((MARGIN + box_w - pad - value_x) / (CHAR_W * fs)) as usize;
     let top = ph - MARGIN;
@@ -221,7 +269,13 @@ fn layout_cards(headers: &[String], rows: &[Vec<String>], title: &str, (pw, ph):
         p.rect(MARGIN, y - h, box_w, h, 0.6);
         let mut ly = y - pad;
         for (c, lines) in cells.iter().enumerate() {
-            p.text(MARGIN + pad, ly - fs, fs, true, &headers[c].chars().take(label_chars).collect::<String>());
+            p.text(
+                MARGIN + pad,
+                ly - fs,
+                fs,
+                true,
+                &headers[c].chars().take(label_chars).collect::<String>(),
+            );
             for l in lines {
                 p.text(value_x, ly - fs, fs, false, l);
                 ly -= lh;
@@ -255,15 +309,29 @@ pub struct CardRow {
 pub fn card_rows(store: &Store, table: usize, ids: &[u64]) -> Option<Vec<CardRow>> {
     let t = &store.schema.tables[table];
     let card = t.card.as_ref()?;
-    let fmt = |r: &fa_data::Row, name: &str| t.field_index(name).map(|i| format_value(&r.values[i], &t.fields[i])).unwrap_or_default();
-    let by_id: std::collections::HashMap<u64, &fa_data::Row> = store.tables[table].rows.iter().map(|r| (r.id, r)).collect();
+    let fmt = |r: &latent_data::Row, name: &str| {
+        t.field_index(name)
+            .map(|i| format_value(&r.values[i], &t.fields[i]))
+            .unwrap_or_default()
+    };
+    let by_id: std::collections::HashMap<u64, &latent_data::Row> =
+        store.tables[table].rows.iter().map(|r| (r.id, r)).collect();
     Some(
         ids.iter()
             .filter_map(|id| by_id.get(id))
             .map(|r| CardRow {
                 height_key: card.height_field.as_deref().map(|f| fmt(r, f)),
-                cells: card.cells.iter().flatten().map(|c| fmt(r, &c.field)).collect(),
-                text: card.text.as_ref().map(|x| fmt(r, &x.field)).unwrap_or_default(),
+                cells: card
+                    .cells
+                    .iter()
+                    .flatten()
+                    .map(|c| fmt(r, &c.field))
+                    .collect(),
+                text: card
+                    .text
+                    .as_ref()
+                    .map(|x| fmt(r, &x.field))
+                    .unwrap_or_default(),
             })
             .collect(),
     )
@@ -273,14 +341,14 @@ const MM: f32 = 72.0 / 25.4;
 const CARD_FS: f32 = 8.0;
 
 /// Lay out cards exactly as the schema `card` describes (mm on A4 portrait, as the Qt app did).
-pub fn render_cards_pdf(card: &fa_schema::Card, rows: &[CardRow]) -> Vec<u8> {
+pub fn render_cards_pdf(card: &latent_schema::Card, rows: &[CardRow]) -> Vec<u8> {
     let page_h = A4.1 / MM;
     let char_mm = CARD_FS * CHAR_W / MM;
     let line_mm = CARD_FS * 1.25 / MM;
     let (x0, w) = (card.x, card.width);
-    let flat: Vec<&fa_schema::CardCell> = card.cells.iter().flatten().collect();
+    let flat: Vec<&latent_schema::CardCell> = card.cells.iter().flatten().collect();
     let grid_h = 5.0 * card.cells.len() as f32;
-    let val_at = |c: &fa_schema::CardCell| c.value_at.unwrap_or(card.label_width);
+    let val_at = |c: &latent_schema::CardCell| c.value_at.unwrap_or(card.label_width);
     // Inner vertical dividers over the cell grid (the label divider spans the whole card).
     let mut dividers: Vec<f32> = vec![];
     for c in &flat {
@@ -314,14 +382,26 @@ pub fn render_cards_pdf(card: &fa_schema::Card, rows: &[CardRow]) -> Vec<u8> {
                 let end = line.get(i + 1).map_or(w, |n| n.at.unwrap_or(0.0));
                 let fit = (((end - val_at(c) - 1.0) / char_mm) as usize).max(1);
                 let (vx, vy) = px(x0 + val_at(c) + 1.0, row_y);
-                p.text(vx, vy, CARD_FS, false, &row.cells[k].chars().take(fit).collect::<String>());
+                p.text(
+                    vx,
+                    vy,
+                    CARD_FS,
+                    false,
+                    &row.cells[k].chars().take(fit).collect::<String>(),
+                );
                 k += 1;
             }
         }
         if let Some(t) = &card.text {
             let base = grid_h + 4.0;
             let (lx, ly) = px(x0 + 1.0, y + base);
-            p.text(lx, ly, CARD_FS, true, &format!("{}:", t.label.as_deref().unwrap_or(&t.field)));
+            p.text(
+                lx,
+                ly,
+                CARD_FS,
+                true,
+                &format!("{}:", t.label.as_deref().unwrap_or(&t.field)),
+            );
             let chars = ((w - card.label_width - 2.0) / char_mm) as usize;
             for (n, l) in wrap(&row.text, chars).iter().enumerate() {
                 let by = base + n as f32 * line_mm;
@@ -355,16 +435,28 @@ pub fn render_cards_pdf(card: &fa_schema::Card, rows: &[CardRow]) -> Vec<u8> {
 fn assemble(mut pages: Vec<Page>, size: (f32, f32)) -> Vec<u8> {
     let count = pages.len();
     for (i, p) in pages.iter_mut().enumerate() {
-        p.text(size.0 - MARGIN - 8.0 * 9.0 * CHAR_W, MARGIN - 4.0, 9.0, false, &format!("Seite {}/{}", i + 1, count));
+        p.text(
+            size.0 - MARGIN - 8.0 * 9.0 * CHAR_W,
+            MARGIN - 4.0,
+            9.0,
+            false,
+            &format!("Seite {}/{}", i + 1, count),
+        );
     }
 
     // Objects: 1 catalog, 2 pages, 3 Courier, 4 Courier-Bold, then (page, content) pairs.
     let mut objs: Vec<String> = vec![String::new(); 4];
     objs[0] = "<< /Type /Catalog /Pages 2 0 R >>".into();
     let kids: Vec<String> = (0..count).map(|i| format!("{} 0 R", 5 + 2 * i)).collect();
-    objs[1] = format!("<< /Type /Pages /Kids [{}] /Count {count} >>", kids.join(" "));
-    objs[2] = "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".into();
-    objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>".into();
+    objs[1] = format!(
+        "<< /Type /Pages /Kids [{}] /Count {count} >>",
+        kids.join(" ")
+    );
+    objs[2] =
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".into();
+    objs[3] =
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>"
+            .into();
     for (i, p) in pages.iter().enumerate() {
         objs.push(format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {} 0 R >>",
@@ -372,7 +464,11 @@ fn assemble(mut pages: Vec<Page>, size: (f32, f32)) -> Vec<u8> {
             size.1,
             6 + 2 * i
         ));
-        objs.push(format!("<< /Length {} >>\nstream\n{}endstream", p.ops.len(), p.ops));
+        objs.push(format!(
+            "<< /Length {} >>\nstream\n{}endstream",
+            p.ops.len(),
+            p.ops
+        ));
     }
 
     // Everything is ASCII (non-ASCII text is octal-escaped), so str offsets are byte offsets.
@@ -383,11 +479,17 @@ fn assemble(mut pages: Vec<Page>, size: (f32, f32)) -> Vec<u8> {
         out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
     }
     let xref = out.len();
-    out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
+    out.push_str(&format!(
+        "xref\n0 {}\n0000000000 65535 f \n",
+        objs.len() + 1
+    ));
     for off in offsets {
         out.push_str(&format!("{off:010} 00000 n \n"));
     }
-    out.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1));
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objs.len() + 1
+    ));
     out.into_bytes()
 }
 
@@ -396,12 +498,25 @@ mod tests {
     use super::*;
 
     fn opts(layout: Layout) -> PrintOpts {
-        PrintOpts { layout, landscape: false, title: "Rollfilme".into(), columns: vec![], selected_only: false }
+        PrintOpts {
+            layout,
+            landscape: false,
+            title: "Rollfilme".into(),
+            columns: vec![],
+            selected_only: false,
+        }
     }
 
     fn sample(n: usize) -> (Vec<String>, Vec<Vec<String>>) {
         let headers = vec!["Nr".to_string(), "Motiv (Größe)".to_string()];
-        let rows = (0..n).map(|i| vec![i.to_string(), format!("Bäume (a\\b) {}", "lang ".repeat(30))]).collect();
+        let rows = (0..n)
+            .map(|i| {
+                vec![
+                    i.to_string(),
+                    format!("Bäume (a\\b) {}", "lang ".repeat(30)),
+                ]
+            })
+            .collect();
         (headers, rows)
     }
 
@@ -445,29 +560,75 @@ mod tests {
         assert_eq!(wrap("a\nb", 5), vec!["a", "b"]);
     }
 
-    fn qt_card() -> fa_schema::Card {
-        let s = fa_schema::Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap();
+    fn qt_card() -> latent_schema::Card {
+        let s =
+            latent_schema::Schema::from_json(include_str!("../../../schemas/latent.json")).unwrap();
         s.table("roll_film").unwrap().card.clone().unwrap()
     }
 
     fn film(format: &str) -> CardRow {
-        let cells = ["12", "400", "01.02.2024", "Rodinal", "HP5", "08:30", "Leica", "20.0"];
-        CardRow { height_key: Some(format.into()), cells: cells.map(String::from).to_vec(), text: "Bäume im Park".into() }
+        let cells = [
+            "12",
+            "400",
+            "01.02.2024",
+            "Rodinal",
+            "HP5",
+            "08:30",
+            "Leica",
+            "20.0",
+        ];
+        CardRow {
+            height_key: Some(format.into()),
+            cells: cells.map(String::from).to_vec(),
+            text: "Bäume im Park".into(),
+        }
     }
 
     #[test]
     fn cards_use_qt_geometry() {
         let card = qt_card();
-        let pdf = String::from_utf8(render_cards_pdf(&card, &[film("135er"), film("120er")])).unwrap();
+        let pdf =
+            String::from_utf8(render_cards_pdf(&card, &[film("135er"), film("120er")])).unwrap();
         let mm = |v: f32| format!("{:.2}", v * MM);
         // 40 mm from the left, 130 mm wide; first box 36 mm tall starting 20 mm from the top.
-        assert!(pdf.contains(&format!("{} {} {} {} re S", mm(40.0), mm(297.0 - 20.0 - 36.0), mm(130.0), mm(36.0))), "{pdf}");
+        assert!(
+            pdf.contains(&format!(
+                "{} {} {} {} re S",
+                mm(40.0),
+                mm(297.0 - 20.0 - 36.0),
+                mm(130.0),
+                mm(36.0)
+            )),
+            "{pdf}"
+        );
         // The 120er box follows directly below (no gap), 58 mm tall.
-        assert!(pdf.contains(&format!("{} {} {} {} re S", mm(40.0), mm(297.0 - 56.0 - 58.0), mm(130.0), mm(58.0))));
+        assert!(pdf.contains(&format!(
+            "{} {} {} {} re S",
+            mm(40.0),
+            mm(297.0 - 56.0 - 58.0),
+            mm(130.0),
+            mm(58.0)
+        )));
         // Inner dividers at x+65 and x+95, 20 mm tall.
-        assert!(pdf.contains(&format!("{} {} m {} {} l S", mm(105.0), mm(297.0 - 20.0), mm(105.0), mm(297.0 - 40.0))));
-        assert!(pdf.contains(&format!("{} {} m {} {} l S", mm(135.0), mm(297.0 - 20.0), mm(135.0), mm(297.0 - 40.0))));
-        assert!(pdf.contains("(Film Nr.:)") && pdf.contains("(Temperatur:)") && pdf.contains("(Motiv:)"));
+        assert!(pdf.contains(&format!(
+            "{} {} m {} {} l S",
+            mm(105.0),
+            mm(297.0 - 20.0),
+            mm(105.0),
+            mm(297.0 - 40.0)
+        )));
+        assert!(pdf.contains(&format!(
+            "{} {} m {} {} l S",
+            mm(135.0),
+            mm(297.0 - 20.0),
+            mm(135.0),
+            mm(297.0 - 40.0)
+        )));
+        assert!(
+            pdf.contains("(Film Nr.:)")
+                && pdf.contains("(Temperatur:)")
+                && pdf.contains("(Motiv:)")
+        );
         assert!(pdf.contains("(B\\344ume im Park)"));
     }
 
@@ -476,7 +637,10 @@ mod tests {
         let card = qt_card();
         let count = |n: usize| {
             let rows: Vec<CardRow> = (0..n).map(|_| film("120er")).collect();
-            String::from_utf8(render_cards_pdf(&card, &rows)).unwrap().matches("/Type /Page ").count()
+            String::from_utf8(render_cards_pdf(&card, &rows))
+                .unwrap()
+                .matches("/Type /Page ")
+                .count()
         };
         // The 4th box starts at 20 + 3*58 = 194 <= 297 - 20 - 58 = 219, the 5th at 252 > 219 breaks the page.
         assert_eq!(count(4), 1);

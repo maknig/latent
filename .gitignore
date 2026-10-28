@@ -1,6 +1,10 @@
 target
 dist
 result
+latent.schema.json
+latent.data.json
+*.bak
+latent.faces.json
+latent.vision.json
 filmarchiv.schema.json
 filmarchiv.data.json
-*.bak

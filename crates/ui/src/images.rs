@@ -7,10 +7,9 @@ use crate::histogram::{image_stats, ImageStats};
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-
 
 pub enum Thumb {
     Loading,
@@ -73,7 +72,16 @@ pub struct Thumbs {
 impl Default for Thumbs {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Thumbs { map: HashMap::new(), frame: 0, now: Arc::default(), cache_dir: None, queue: None, pending: VecDeque::new(), tx, rx }
+        Thumbs {
+            map: HashMap::new(),
+            frame: 0,
+            now: Arc::default(),
+            cache_dir: None,
+            queue: None,
+            pending: VecDeque::new(),
+            tx,
+            rx,
+        }
     }
 }
 
@@ -81,16 +89,26 @@ impl Default for Thumbs {
 fn cache_file(dir: &Path, path: &Path, size: u32) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (path, meta.len(), mtime.as_nanos()).hash(&mut h);
-    Some(dir.join(size.to_string()).join(format!("{:016x}.png", h.finish())))
+    Some(
+        dir.join(size.to_string())
+            .join(format!("{:016x}.png", h.finish())),
+    )
 }
 
 /// Format and lowercase extension of an editable image file (JPEG, PNG or TIFF).
 fn editable(path: &Path) -> Result<(image::ImageFormat, String), String> {
     use image::ImageFormat;
-    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     let format = match ext.as_str() {
         "jpg" | "jpeg" => ImageFormat::Jpeg,
         "png" => ImageFormat::Png,
@@ -102,20 +120,34 @@ fn editable(path: &Path) -> Result<(image::ImageFormat, String), String> {
 
 /// Replaces the image file `path` with `im`, keeping its format.
 /// The result is written to a temp file and renamed over the original; JPEGs are re-encoded (quality 95, no EXIF).
-fn overwrite(path: &Path, im: &image::DynamicImage, format: image::ImageFormat, ext: &str) -> Result<(), String> {
+fn overwrite(
+    path: &Path,
+    im: &image::DynamicImage,
+    format: image::ImageFormat,
+    ext: &str,
+) -> Result<(), String> {
     use image::{codecs::jpeg::JpegEncoder, ImageFormat};
     let tmp = path.with_extension(format!("{ext}.tmp"));
     let saved = if format == ImageFormat::Jpeg {
         std::fs::File::create(&tmp)
             .map_err(|e| e.to_string())
-            .and_then(|f| im.to_rgb8().write_with_encoder(JpegEncoder::new_with_quality(std::io::BufWriter::new(f), 95)).map_err(|e| e.to_string()))
+            .and_then(|f| {
+                im.to_rgb8()
+                    .write_with_encoder(JpegEncoder::new_with_quality(
+                        std::io::BufWriter::new(f),
+                        95,
+                    ))
+                    .map_err(|e| e.to_string())
+            })
     } else {
         im.save_with_format(&tmp, format).map_err(|e| e.to_string())
     };
-    saved.and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string())).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", path.display())
-    })
+    saved
+        .and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{}: {e}", path.display())
+        })
 }
 
 /// Rotates the image file by `quarter_turns` clockwise (negative = counter-clockwise), keeping its format.
@@ -163,9 +195,17 @@ const FEATHER: f32 = 1.2;
 fn spot_mask(w: u32, h: u32, spots: &[Spot]) -> Vec<bool> {
     let mut mask = vec![false; (w * h) as usize];
     for s in spots {
-        let (cx, cy, reach) = (s.x * w as f32, s.y * h as f32, (s.r * w as f32).max(1.0) * FEATHER);
-        for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h as i64 - 1) {
-            for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w as i64 - 1) {
+        let (cx, cy, reach) = (
+            s.x * w as f32,
+            s.y * h as f32,
+            (s.r * w as f32).max(1.0) * FEATHER,
+        );
+        for y in
+            ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h as i64 - 1)
+        {
+            for x in ((cx - reach).floor() as i64).max(0)
+                ..=((cx + reach).ceil() as i64).min(w as i64 - 1)
+            {
                 if (x as f32 - cx).hypot(y as f32 - cy) <= reach {
                     mask[(y as u32 * w + x as u32) as usize] = true;
                 }
@@ -183,7 +223,10 @@ fn median_fill(im: &image::RgbImage, cx: f32, cy: f32, r: f32) -> Option<[f32; 3
     for ring in [1.4_f32, 1.7, 2.0] {
         for a in 0..ANGLES {
             let t = (a as f32 + ring) / ANGLES as f32 * std::f32::consts::TAU;
-            let (x, y) = ((cx + t.cos() * r * ring).round() as i64, (cy + t.sin() * r * ring).round() as i64);
+            let (x, y) = (
+                (cx + t.cos() * r * ring).round() as i64,
+                (cy + t.sin() * r * ring).round() as i64,
+            );
             if (0..w).contains(&x) && (0..h).contains(&y) {
                 let p = im.get_pixel(x as u32, y as u32);
                 for c in 0..3 {
@@ -222,15 +265,25 @@ fn ring_offsets(lo: f32, hi: f32, stride: i64) -> Vec<(i64, i64)> {
 /// Offset `(dx, dy)` of the nearby area that looks most like the surroundings of the spot at `(cx, cy)`,
 /// and the per-channel mean difference (spot surroundings minus source) for matching brightness.
 /// `mask` marks pixels that must not be used (spots still to be healed).
-fn best_source(im: &image::RgbImage, mask: &[bool], cx: f32, cy: f32, r: f32) -> Option<((i64, i64), [f32; 3])> {
+fn best_source(
+    im: &image::RgbImage,
+    mask: &[bool],
+    cx: f32,
+    cy: f32,
+    r: f32,
+) -> Option<((i64, i64), [f32; 3])> {
     let (w, h) = (im.width() as i64, im.height() as i64);
     let inner = r * FEATHER;
     let outer = inner + (r * 0.6).max(3.0);
     let stride = ((r / 6.0) as i64).max(1);
-    let usable = |x: i64, y: i64| (0..w).contains(&x) && (0..h).contains(&y) && !mask[(y * w + x) as usize];
+    let usable =
+        |x: i64, y: i64| (0..w).contains(&x) && (0..h).contains(&y) && !mask[(y * w + x) as usize];
     let (px, py) = (cx.round() as i64, cy.round() as i64);
     // Context: pixels around the spot that are themselves intact. Disc: what a candidate must supply.
-    let context: Vec<(i64, i64)> = ring_offsets(inner, outer, stride).into_iter().filter(|&(x, y)| usable(px + x, py + y)).collect();
+    let context: Vec<(i64, i64)> = ring_offsets(inner, outer, stride)
+        .into_iter()
+        .filter(|&(x, y)| usable(px + x, py + y))
+        .collect();
     if context.len() < 12 {
         return None;
     }
@@ -247,12 +300,19 @@ fn best_source(im: &image::RgbImage, mask: &[bool], cx: f32, cy: f32, r: f32) ->
             if dist < min_d || dist > max_d {
                 continue;
             }
-            if !disc.iter().chain(&context).all(|&(x, y)| usable(px + dx + x, py + dy + y)) {
+            if !disc
+                .iter()
+                .chain(&context)
+                .all(|&(x, y)| usable(px + dx + x, py + dy + y))
+            {
                 continue;
             }
             let mut ssd = 0.0_f64;
             for &(x, y) in &context {
-                let (a, b) = (im.get_pixel((px + x) as u32, (py + y) as u32), im.get_pixel((px + dx + x) as u32, (py + dy + y) as u32));
+                let (a, b) = (
+                    im.get_pixel((px + x) as u32, (py + y) as u32),
+                    im.get_pixel((px + dx + x) as u32, (py + dy + y) as u32),
+                );
                 for c in 0..3 {
                     let d = a[c] as f64 - b[c] as f64;
                     ssd += d * d;
@@ -269,7 +329,10 @@ fn best_source(im: &image::RgbImage, mask: &[bool], cx: f32, cy: f32, r: f32) ->
     let (_, (dx, dy)) = best?;
     let mut delta = [0.0_f32; 3];
     for &(x, y) in &context {
-        let (a, b) = (im.get_pixel((px + x) as u32, (py + y) as u32), im.get_pixel((px + dx + x) as u32, (py + dy + y) as u32));
+        let (a, b) = (
+            im.get_pixel((px + x) as u32, (py + y) as u32),
+            im.get_pixel((px + dx + x) as u32, (py + dy + y) as u32),
+        );
         for c in 0..3 {
             delta[c] += (a[c] as f32 - b[c] as f32) / context.len() as f32;
         }
@@ -286,12 +349,20 @@ fn heal(im: &mut image::RgbImage, spots: &[Spot]) {
     for s in spots {
         let (cx, cy, r) = (s.x * w as f32, s.y * h as f32, (s.r * w as f32).max(1.0));
         let source = best_source(im, &mask, cx, cy, r);
-        let flat = if source.is_none() { median_fill(im, cx, cy, r) } else { None };
+        let flat = if source.is_none() {
+            median_fill(im, cx, cy, r)
+        } else {
+            None
+        };
         if source.is_some() || flat.is_some() {
             let reach = r * FEATHER;
-            for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h - 1) {
-                for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1) {
-                    let a = ((reach - (x as f32 - cx).hypot(y as f32 - cy)) / (reach - r)).clamp(0.0, 1.0);
+            for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h - 1)
+            {
+                for x in
+                    ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1)
+                {
+                    let a = ((reach - (x as f32 - cx).hypot(y as f32 - cy)) / (reach - r))
+                        .clamp(0.0, 1.0);
                     if a <= 0.0 {
                         continue;
                     }
@@ -302,14 +373,20 @@ fn heal(im: &mut image::RgbImage, spots: &[Spot]) {
                                 continue;
                             }
                             let p = im.get_pixel(sx as u32, sy as u32);
-                            [p[0] as f32 + delta[0], p[1] as f32 + delta[1], p[2] as f32 + delta[2]]
+                            [
+                                p[0] as f32 + delta[0],
+                                p[1] as f32 + delta[1],
+                                p[2] as f32 + delta[2],
+                            ]
                         }
                         (None, Some(f)) => f,
                         _ => continue,
                     };
                     let p = im.get_pixel_mut(x as u32, y as u32);
                     for c in 0..3 {
-                        p[c] = (p[c] as f32 * (1.0 - a) + fill[c] * a).round().clamp(0.0, 255.0) as u8;
+                        p[c] = (p[c] as f32 * (1.0 - a) + fill[c] * a)
+                            .round()
+                            .clamp(0.0, 255.0) as u8;
                     }
                 }
             }
@@ -317,7 +394,8 @@ fn heal(im: &mut image::RgbImage, spots: &[Spot]) {
         // The healed area is intact now and may serve as context for later spots.
         let reach = r * FEATHER;
         for y in ((cy - reach).floor() as i64).max(0)..=((cy + reach).ceil() as i64).min(h - 1) {
-            for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1) {
+            for x in ((cx - reach).floor() as i64).max(0)..=((cx + reach).ceil() as i64).min(w - 1)
+            {
                 if (x as f32 - cx).hypot(y as f32 - cy) <= reach {
                     mask[(y * w + x) as usize] = false;
                 }
@@ -332,14 +410,18 @@ pub fn heal_file(path: &Path, spots: &[Spot]) -> Result<(), String> {
     if spots.is_empty() {
         return Ok(());
     }
-    let mut rgb = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?.to_rgb8();
+    let mut rgb = image::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .to_rgb8();
     heal(&mut rgb, spots);
     overwrite(path, &image::DynamicImage::ImageRgb8(rgb), format, &ext)
 }
 
 /// Where the untouched original of `path` is kept: `<archive>/.originals/<path relative to the archive>`.
 fn original_path(archive: &Path, path: &Path) -> Result<PathBuf, String> {
-    let rel = path.strip_prefix(archive).map_err(|_| format!("{}: outside the archive", path.display()))?;
+    let rel = path
+        .strip_prefix(archive)
+        .map_err(|_| format!("{}: outside the archive", path.display()))?;
     Ok(archive.join(".originals").join(rel))
 }
 
@@ -371,24 +453,40 @@ pub fn restore_original(archive: &Path, path: &Path) -> Result<(), String> {
 }
 
 fn to_color_image(im: &image::RgbaImage) -> egui::ColorImage {
-    egui::ColorImage::from_rgba_unmultiplied([im.width() as usize, im.height() as usize], im.as_raw())
+    egui::ColorImage::from_rgba_unmultiplied(
+        [im.width() as usize, im.height() as usize],
+        im.as_raw(),
+    )
 }
 
 fn load(job: Job) -> Payload {
     let (path, size) = &job.key;
-    let cached = if *size <= DISK_CACHE_MAX { job.cache_dir.as_deref().and_then(|d| cache_file(d, path, *size)) } else { None };
+    let cached = if *size <= DISK_CACHE_MAX {
+        job.cache_dir
+            .as_deref()
+            .and_then(|d| cache_file(d, path, *size))
+    } else {
+        None
+    };
     if let Some(c) = &cached {
         if let Ok(im) = image::open(c) {
             return Some((to_color_image(&im.to_rgba8()), None));
         }
     }
     let im = image::open(path).ok()?;
-    let im = if im.width() > *size || im.height() > *size { im.resize(*size, *size, image::imageops::FilterType::Triangle) } else { im }.to_rgba8();
+    let im = if im.width() > *size || im.height() > *size {
+        im.resize(*size, *size, image::imageops::FilterType::Triangle)
+    } else {
+        im
+    }
+    .to_rgba8();
     if let Some(c) = cached {
         if let Some(dir) = c.parent() {
             let tmp = c.with_extension("tmp");
             // Best effort: a failed cache write only costs a re-decode later.
-            if std::fs::create_dir_all(dir).is_ok() && im.save_with_format(&tmp, image::ImageFormat::Png).is_ok() {
+            if std::fs::create_dir_all(dir).is_ok()
+                && im.save_with_format(&tmp, image::ImageFormat::Png).is_ok()
+            {
                 let _ = std::fs::rename(&tmp, &c);
             }
         }
@@ -415,8 +513,13 @@ fn spawn_workers(tx: Sender<Loaded>, ctx: egui::Context, now: Arc<AtomicU64>) ->
                 }
             };
             let key = job.key.clone();
-            let stale = now.load(Ordering::Relaxed) > job.wanted.load(Ordering::Relaxed) + STALE_FRAMES;
-            let outcome = if stale { Outcome::Skipped } else { Outcome::Done(load(job)) };
+            let stale =
+                now.load(Ordering::Relaxed) > job.wanted.load(Ordering::Relaxed) + STALE_FRAMES;
+            let outcome = if stale {
+                Outcome::Skipped
+            } else {
+                Outcome::Done(load(job))
+            };
             let _ = tx.send((key, outcome));
             ctx.request_repaint();
         });
@@ -454,11 +557,26 @@ impl Thumbs {
                 large_uploaded = true;
             }
             let (thumb, hist) = match img {
-                Some((ci, hist)) => (Thumb::Ready(ctx.load_texture(key.0.to_string_lossy(), ci, Default::default())), hist),
+                Some((ci, hist)) => (
+                    Thumb::Ready(ctx.load_texture(key.0.to_string_lossy(), ci, Default::default())),
+                    hist,
+                ),
                 None => (Thumb::Missing, None),
             };
-            let wanted = self.map.get(&key).map(|e| e.wanted.clone()).unwrap_or_default();
-            self.map.insert(key, Entry { thumb, hist, last_used: self.frame, wanted });
+            let wanted = self
+                .map
+                .get(&key)
+                .map(|e| e.wanted.clone())
+                .unwrap_or_default();
+            self.map.insert(
+                key,
+                Entry {
+                    thumb,
+                    hist,
+                    last_used: self.frame,
+                    wanted,
+                },
+            );
         }
         if !deferred.is_empty() {
             self.pending = deferred;
@@ -482,9 +600,15 @@ impl Thumbs {
         // Not drawn in the previous frame.
         let idle = |e: &Entry| e.last_used + 1 < frame;
         let ready = |e: &Entry| matches!(e.thumb, Thumb::Ready(_));
-        self.map.retain(|k, e| !(k.1 >= TRANSIENT_MIN && idle(e) && ready(e)));
+        self.map
+            .retain(|k, e| !(k.1 >= TRANSIENT_MIN && idle(e) && ready(e)));
         if self.map.len() > MAX_ENTRIES {
-            let mut old: Vec<_> = self.map.iter().filter(|(_, e)| idle(e) && ready(e)).map(|(k, e)| (e.last_used, k.clone())).collect();
+            let mut old: Vec<_> = self
+                .map
+                .iter()
+                .filter(|(_, e)| idle(e) && ready(e))
+                .map(|(k, e)| (e.last_used, k.clone()))
+                .collect();
             old.sort();
             for (_, k) in old.into_iter().take(self.map.len() - MAX_ENTRIES) {
                 self.map.remove(&k);
@@ -512,10 +636,24 @@ impl Thumbs {
         let frame = self.frame;
         if !self.map.contains_key(&key) {
             let wanted = Arc::new(AtomicU64::new(frame));
-            self.map.insert(key.clone(), Entry { thumb: Thumb::Loading, hist: None, last_used: frame, wanted: wanted.clone() });
+            self.map.insert(
+                key.clone(),
+                Entry {
+                    thumb: Thumb::Loading,
+                    hist: None,
+                    last_used: frame,
+                    wanted: wanted.clone(),
+                },
+            );
             let (tx, now) = (self.tx.clone(), self.now.clone());
-            let queue = self.queue.get_or_insert_with(|| spawn_workers(tx, ctx.clone(), now));
-            let job = Job { key: key.clone(), cache_dir: self.cache_dir.clone(), wanted };
+            let queue = self
+                .queue
+                .get_or_insert_with(|| spawn_workers(tx, ctx.clone(), now));
+            let job = Job {
+                key: key.clone(),
+                cache_dir: self.cache_dir.clone(),
+                wanted,
+            };
             let mut jobs = queue.jobs.lock().unwrap();
             if low {
                 jobs.1.push(job);
@@ -535,38 +673,80 @@ impl Thumbs {
 fn crop_uv(tex: egui::Vec2, view: egui::Vec2) -> egui::Rect {
     let scale = (view.x / tex.x).max(view.y / tex.y);
     let (fx, fy) = (view.x / (tex.x * scale), view.y / (tex.y * scale));
-    egui::Rect::from_min_max(egui::pos2((1.0 - fx) / 2.0, (1.0 - fy) / 2.0), egui::pos2((1.0 + fx) / 2.0, (1.0 + fy) / 2.0))
+    egui::Rect::from_min_max(
+        egui::pos2((1.0 - fx) / 2.0, (1.0 - fy) / 2.0),
+        egui::pos2((1.0 + fx) / 2.0, (1.0 + fy) / 2.0),
+    )
 }
 
 impl Thumbs {
     /// Paint the thumbnail of `path` fitted into `rect`; spinner while loading, "missing" if unreadable.
-    pub fn paint(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, rect: egui::Rect, size: u32) {
+    pub fn paint(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        path: &Path,
+        rect: egui::Rect,
+        size: u32,
+    ) {
         self.paint_with(ui, ctx, path, rect, size, false);
     }
 
     /// Like `paint`, but fills `rect` completely with a center crop.
-    pub fn paint_cropped(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, rect: egui::Rect, size: u32) {
+    pub fn paint_cropped(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        path: &Path,
+        rect: egui::Rect,
+        size: u32,
+    ) {
         self.paint_with(ui, ctx, path, rect, size, true);
     }
 
-    fn paint_with(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, rect: egui::Rect, size: u32, crop: bool) {
+    fn paint_with(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        path: &Path,
+        rect: egui::Rect,
+        size: u32,
+        crop: bool,
+    ) {
         match self.get(ctx, path, size) {
             Thumb::Ready(tex) => {
                 let s = tex.size_vec2();
                 if crop {
-                    ui.painter().image(tex.id(), rect, crop_uv(s, rect.size()), egui::Color32::WHITE);
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        crop_uv(s, rect.size()),
+                        egui::Color32::WHITE,
+                    );
                 } else {
                     let scale = (rect.width() / s.x).min(rect.height() / s.y);
                     let r = egui::Rect::from_center_size(rect.center(), s * scale);
-                    ui.painter().image(tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    ui.painter().image(
+                        tex.id(),
+                        r,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 }
             }
             Thumb::Loading => {
                 ui.put(rect, egui::Spinner::new());
             }
             Thumb::Missing => {
-                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(45));
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "missing", egui::FontId::proportional(12.0), egui::Color32::GRAY);
+                ui.painter()
+                    .rect_filled(rect, 4.0, egui::Color32::from_gray(45));
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "missing",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::GRAY,
+                );
             }
         }
     }
@@ -590,7 +770,7 @@ mod tests {
 
     #[test]
     fn rotate_file_turns_pixels() {
-        let dir = std::env::temp_dir().join(format!("fa-rotate-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latent-rotate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for name in ["a.png", "a.jpg", "a.tif"] {
             let p = dir.join(name);
@@ -601,11 +781,16 @@ mod tests {
             let r = image::open(&p).unwrap().to_rgb8();
             assert_eq!((r.width(), r.height()), (1, 2), "{name}");
             // the first pixel moved from the left to the top
-            assert!(r.get_pixel(0, 0)[0] > 200 && r.get_pixel(0, 1)[0] < 50, "{name}");
+            assert!(
+                r.get_pixel(0, 0)[0] > 200 && r.get_pixel(0, 1)[0] < 50,
+                "{name}"
+            );
             rotate_file(&p, -1).unwrap();
             assert_eq!(image::open(&p).unwrap().width(), 2, "{name}");
             rotate_file(&p, 4).unwrap();
-            assert!(!p.with_extension(format!("{}.tmp", name.rsplit('.').next().unwrap())).exists());
+            assert!(!p
+                .with_extension(format!("{}.tmp", name.rsplit('.').next().unwrap()))
+                .exists());
         }
         assert!(rotate_file(&dir.join("a.gif"), 1).is_err());
         std::fs::remove_dir_all(&dir).ok();
@@ -613,7 +798,7 @@ mod tests {
 
     #[test]
     fn crop_and_restore() {
-        let dir = std::env::temp_dir().join(format!("fa-crop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latent-crop-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("images")).unwrap();
         for name in ["a.png", "a.jpg"] {
             let p = dir.join("images").join(name);
@@ -651,7 +836,11 @@ mod tests {
                 im.put_pixel(x, y, image::Rgb([255, 255, 255]));
             }
         }
-        let spot = Spot { x: 60.0 / 120.0, y: 60.0 / 120.0, r: 0.05 };
+        let spot = Spot {
+            x: 60.0 / 120.0,
+            y: 60.0 / 120.0,
+            r: 0.05,
+        };
         heal(&mut im, &[spot]);
         assert_eq!(im, clean);
     }
@@ -666,7 +855,18 @@ mod tests {
                 im.put_pixel(x + 24, y, image::Rgb([255, 255, 255]));
             }
         }
-        let spots = [Spot { x: 36.0 / 120.0, y: 60.0 / 120.0, r: 0.07 }, Spot { x: 60.0 / 120.0, y: 60.0 / 120.0, r: 0.07 }];
+        let spots = [
+            Spot {
+                x: 36.0 / 120.0,
+                y: 60.0 / 120.0,
+                r: 0.07,
+            },
+            Spot {
+                x: 60.0 / 120.0,
+                y: 60.0 / 120.0,
+                r: 0.07,
+            },
+        ];
         heal(&mut im, &spots);
         assert!(im.pixels().all(|p| p.0 == [90, 90, 90]));
     }
@@ -678,17 +878,38 @@ mod tests {
             im.put_pixel(x, y, image::Rgb([255, 255, 255]));
         }
         im.put_pixel(5, 5, image::Rgb([0, 0, 0]));
-        heal(&mut im, &[Spot { x: 0.505, y: 0.505, r: 0.03 }]);
+        heal(
+            &mut im,
+            &[Spot {
+                x: 0.505,
+                y: 0.505,
+                r: 0.03,
+            }],
+        );
         assert_eq!(im.get_pixel(50, 50).0, [100, 120, 140]);
         assert_eq!(im.get_pixel(51, 51).0, [100, 120, 140]);
         assert_eq!(im.get_pixel(5, 5).0, [0, 0, 0]);
         // a spot at the corner has fewer samples but must not panic
-        heal(&mut im, &[Spot { x: 0.0, y: 0.0, r: 0.05 }, Spot { x: 1.0, y: 1.0, r: 0.5 }]);
+        heal(
+            &mut im,
+            &[
+                Spot {
+                    x: 0.0,
+                    y: 0.0,
+                    r: 0.05,
+                },
+                Spot {
+                    x: 1.0,
+                    y: 1.0,
+                    r: 0.5,
+                },
+            ],
+        );
     }
 
     #[test]
     fn cache_file_follows_file_changes() {
-        let dir = std::env::temp_dir().join(format!("fa-thumbs-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("latent-thumbs-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("a.png");
         std::fs::write(&f, b"one").unwrap();

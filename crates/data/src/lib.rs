@@ -1,6 +1,6 @@
-//! Typed values, rows and tables driven by an `fa-schema` schema, plus CSV/JSON IO.
+//! Typed values, rows and tables driven by an `latent-schema` schema, plus CSV/JSON IO.
 use chrono::NaiveDate;
-use fa_schema::{Field, FieldType, Schema, Table};
+use latent_schema::{Field, FieldType, Schema, Table};
 use serde_json::{json, Value as Json};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ pub enum DataError {
     #[error("csv: {0}")]
     Csv(#[from] csv::Error),
     #[error("schema: {0}")]
-    Schema(#[from] fa_schema::SchemaError),
+    Schema(#[from] latent_schema::SchemaError),
     #[error("unknown table '{0}'")]
     UnknownTable(String),
 }
@@ -84,7 +84,8 @@ pub fn image_paths(v: &Value) -> Vec<String> {
 }
 
 /// Warning text returned by `Store::load` when an old schema got image links added.
-pub const UPGRADE_WARNING: &str = "schema upgraded: image links and image info added (save to keep)";
+pub const UPGRADE_WARNING: &str =
+    "schema upgraded: image links and image info added (save to keep)";
 
 /// Film table name and row id encoded in an image path `images/<table>/<id:04>/<file>`.
 pub fn film_row_for(path: &str) -> Option<(String, u64)> {
@@ -100,7 +101,10 @@ pub fn film_row_for(path: &str) -> Option<(String, u64)> {
 
 /// Ids of the enlargement rows whose `image_ref` is `path`.
 pub fn enlargements_for(store: &Store, path: &str) -> Vec<u64> {
-    let Some(ti) = store.schema.role_index(fa_schema::TableRole::Enlargement) else {
+    let Some(ti) = store
+        .schema
+        .role_index(latent_schema::TableRole::Enlargement)
+    else {
         return vec![];
     };
     let Some(fi) = store.schema.tables[ti].image_ref_index() else {
@@ -116,9 +120,15 @@ pub fn enlargements_for(store: &Store, path: &str) -> Vec<u64> {
 
 /// Id of the `image_info` row whose `image_ref` is `path`.
 pub fn image_info_for(store: &Store, path: &str) -> Option<u64> {
-    let ti = store.schema.role_index(fa_schema::TableRole::ImageInfo)?;
+    let ti = store
+        .schema
+        .role_index(latent_schema::TableRole::ImageInfo)?;
     let fi = store.schema.tables[ti].image_ref_index()?;
-    store.tables[ti].rows.iter().find(|r| matches!(&r.values[fi], Value::Text(s) if s.trim() == path)).map(|r| r.id)
+    store.tables[ti]
+        .rows
+        .iter()
+        .find(|r| matches!(&r.values[fi], Value::Text(s) if s.trim() == path))
+        .map(|r| r.id)
 }
 
 pub fn format_time(secs: u32, fmt: &str) -> String {
@@ -176,7 +186,9 @@ pub fn parse_value(s: &str, f: &Field) -> Result<Value, DataError> {
             Value::Date(NaiveDate::parse_from_str(s, f.date_format()).map_err(|_| err("date"))?)
         }
         FieldType::Time => Value::Time(parse_time(s, f.time_format()).ok_or_else(|| err("time"))?),
-        FieldType::Text | FieldType::Enum | FieldType::Images | FieldType::ImageRef => Value::Text(s.to_string()),
+        FieldType::Text | FieldType::Enum | FieldType::Images | FieldType::ImageRef => {
+            Value::Text(s.to_string())
+        }
     })
 }
 
@@ -210,7 +222,9 @@ pub fn from_json(j: &Json, f: &Field) -> Result<Value, DataError> {
         (Json::String(s), FieldType::Date) => {
             Value::Date(NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| bad())?)
         }
-        (Json::String(s), FieldType::Text | FieldType::Enum | FieldType::ImageRef) => Value::Text(s.clone()),
+        (Json::String(s), FieldType::Text | FieldType::Enum | FieldType::ImageRef) => {
+            Value::Text(s.clone())
+        }
         (Json::Number(n), FieldType::Int | FieldType::Id) => {
             Value::Int(n.as_i64().ok_or_else(bad)?)
         }
@@ -528,12 +542,15 @@ mod tests {
     use super::*;
 
     fn schema() -> Schema {
-        Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap()
+        Schema::from_json(include_str!("../../../schemas/latent.json")).unwrap()
     }
 
     #[test]
     fn image_ref_links() {
-        assert_eq!(film_row_for("images/roll_film/0012/x.jpg"), Some(("roll_film".into(), 12)));
+        assert_eq!(
+            film_row_for("images/roll_film/0012/x.jpg"),
+            Some(("roll_film".into(), 12))
+        );
         assert_eq!(film_row_for("foo/bar"), None);
         let sj = r#"{"name":"x","tables":[
             {"name":"f","role":"film","fields":[{"name":"images","type":"images"}]},
@@ -817,11 +834,11 @@ pub mod fs {
 mod fs_tests {
     #[test]
     fn save_load_with_backup() {
-        let dir = std::env::temp_dir().join("fa_fs_test");
+        let dir = std::env::temp_dir().join("latent_fs_test");
         std::fs::create_dir_all(&dir).unwrap();
         let (s, d) = (dir.join("a.schema.json"), dir.join("a.data.json"));
         let schema =
-            fa_schema::Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap();
+            latent_schema::Schema::from_json(include_str!("../../../schemas/latent.json")).unwrap();
         let store = crate::Store::new(schema);
         super::fs::save(&store, &s, &d).unwrap();
         super::fs::save(&store, &s, &d).unwrap();
@@ -836,7 +853,7 @@ mod image_tests {
 
     #[test]
     fn import_and_unused() {
-        let root = std::env::temp_dir().join("fa_img_test");
+        let root = std::env::temp_dir().join("latent_img_test");
         let _ = std::fs::remove_dir_all(&root);
         let (src, arch) = (root.join("src"), root.join("arch"));
         std::fs::create_dir_all(&src).unwrap();

@@ -2,8 +2,11 @@
 //! - tags of its most similar tagged images (embedding model, e.g. DINOv2), and
 //! - CLIP zero-shot scores of a vocabulary (`clip-image` + `clip-text` in `models/`).
 //!
-//! Embeddings are cached in `filmarchiv.vision.json` next to the data.
-use crate::{embed_faces, save_crops, score_tags, suggest_from_neighbours, EmbeddingCache, FaceDetector, FaceStore, Model, OnnxModel, TextModel, FACE_MATCH};
+//! Embeddings are cached in `latent.vision.json` next to the data.
+use crate::{
+    embed_faces, save_crops, score_tags, suggest_from_neighbours, EmbeddingCache, FaceDetector,
+    FaceStore, Model, OnnxModel, TextModel, FACE_MATCH,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -16,32 +19,110 @@ const CLIP_SCALE: f32 = 100.0;
 /// Common photo tags (German tag, English CLIP prompt), offered next to the archive's own tags.
 /// Used when the archive has no `default_tags.json`.
 pub const DEFAULT_TAGS: &[(&str, &str)] = &[
-    ("Berge", "mountains"), ("Schnee", "snow"), ("See", "a lake"), ("Meer", "the sea"), ("Strand", "a beach"),
-    ("Wald", "a forest"), ("Wiese", "a meadow"), ("Fluss", "a river"), ("Wasserfall", "a waterfall"), ("Himmel", "the sky"),
-    ("Wolken", "clouds"), ("Sonnenuntergang", "a sunset"), ("Nebel", "fog"), ("Landschaft", "a landscape"), ("Wüste", "a desert"),
-    ("Blumen", "flowers"), ("Baum", "a tree"), ("Herbst", "autumn leaves"), ("Winter", "a winter scene"), ("Garten", "a garden"),
-    ("Vogel", "a bird"), ("Möwe", "a seagull"), ("Katze", "a cat"), ("Hund", "a dog"), ("Pferd", "a horse"),
-    ("Kuh", "a cow"), ("Schaf", "sheep"), ("Insekt", "an insect"), ("Schmetterling", "a butterfly"), ("Fisch", "a fish"),
-    ("Porträt", "a portrait of a person"), ("Kind", "a child"), ("Menschen", "people"), ("Gruppe", "a group of people"), ("Paar", "a couple"),
-    ("Hände", "hands"), ("Gesicht", "a face"), ("Tanz", "dancers"), ("Musik", "a musician"), ("Sport", "sports"),
-    ("Stadt", "a city"), ("Strasse", "a street"), ("Gebäude", "a building"), ("Architektur", "architecture"), ("Kirche", "a church"),
-    ("Brücke", "a bridge"), ("Turm", "a tower"), ("Fenster", "a window"), ("Tür", "a door"), ("Treppe", "stairs"),
-    ("Dorf", "a village"), ("Markt", "a market"), ("Hafen", "a harbour"), ("Boot", "a boat"), ("Schiff", "a ship"),
-    ("Auto", "a car"), ("Zug", "a train"), ("Fahrrad", "a bicycle"), ("Flugzeug", "an airplane"), ("Motorrad", "a motorcycle"),
-    ("Nacht", "a night scene"), ("Schatten", "shadows"), ("Gegenlicht", "backlit scene"), ("Silhouette", "a silhouette"), ("Spiegelung", "a reflection"),
-    ("Makro", "a macro photo"), ("Detail", "a close-up detail"), ("Muster", "a pattern"), ("Struktur", "a texture"), ("Abstrakt", "an abstract photo"),
-    ("Essen", "food"), ("Tisch", "a table"), ("Innenraum", "an interior room"), ("Stillleben", "a still life"), ("Kunst", "an artwork"),
-    ("Schrift", "text on a sign"), ("Industrie", "an industrial site"), ("Ruine", "a ruin"), ("Friedhof", "a cemetery"), ("Reise", "travel"),
-    ("Schwarzweiss", "a black and white photo"), ("Testbild", "a test chart"), ("Labor", "a laboratory"), ("Computer", "a computer"),
+    ("Berge", "mountains"),
+    ("Schnee", "snow"),
+    ("See", "a lake"),
+    ("Meer", "the sea"),
+    ("Strand", "a beach"),
+    ("Wald", "a forest"),
+    ("Wiese", "a meadow"),
+    ("Fluss", "a river"),
+    ("Wasserfall", "a waterfall"),
+    ("Himmel", "the sky"),
+    ("Wolken", "clouds"),
+    ("Sonnenuntergang", "a sunset"),
+    ("Nebel", "fog"),
+    ("Landschaft", "a landscape"),
+    ("Wüste", "a desert"),
+    ("Blumen", "flowers"),
+    ("Baum", "a tree"),
+    ("Herbst", "autumn leaves"),
+    ("Winter", "a winter scene"),
+    ("Garten", "a garden"),
+    ("Vogel", "a bird"),
+    ("Möwe", "a seagull"),
+    ("Katze", "a cat"),
+    ("Hund", "a dog"),
+    ("Pferd", "a horse"),
+    ("Kuh", "a cow"),
+    ("Schaf", "sheep"),
+    ("Insekt", "an insect"),
+    ("Schmetterling", "a butterfly"),
+    ("Fisch", "a fish"),
+    ("Porträt", "a portrait of a person"),
+    ("Kind", "a child"),
+    ("Menschen", "people"),
+    ("Gruppe", "a group of people"),
+    ("Paar", "a couple"),
+    ("Hände", "hands"),
+    ("Gesicht", "a face"),
+    ("Tanz", "dancers"),
+    ("Musik", "a musician"),
+    ("Sport", "sports"),
+    ("Stadt", "a city"),
+    ("Strasse", "a street"),
+    ("Gebäude", "a building"),
+    ("Architektur", "architecture"),
+    ("Kirche", "a church"),
+    ("Brücke", "a bridge"),
+    ("Turm", "a tower"),
+    ("Fenster", "a window"),
+    ("Tür", "a door"),
+    ("Treppe", "stairs"),
+    ("Dorf", "a village"),
+    ("Markt", "a market"),
+    ("Hafen", "a harbour"),
+    ("Boot", "a boat"),
+    ("Schiff", "a ship"),
+    ("Auto", "a car"),
+    ("Zug", "a train"),
+    ("Fahrrad", "a bicycle"),
+    ("Flugzeug", "an airplane"),
+    ("Motorrad", "a motorcycle"),
+    ("Nacht", "a night scene"),
+    ("Schatten", "shadows"),
+    ("Gegenlicht", "backlit scene"),
+    ("Silhouette", "a silhouette"),
+    ("Spiegelung", "a reflection"),
+    ("Makro", "a macro photo"),
+    ("Detail", "a close-up detail"),
+    ("Muster", "a pattern"),
+    ("Struktur", "a texture"),
+    ("Abstrakt", "an abstract photo"),
+    ("Essen", "food"),
+    ("Tisch", "a table"),
+    ("Innenraum", "an interior room"),
+    ("Stillleben", "a still life"),
+    ("Kunst", "an artwork"),
+    ("Schrift", "text on a sign"),
+    ("Industrie", "an industrial site"),
+    ("Ruine", "a ruin"),
+    ("Friedhof", "a cemetery"),
+    ("Reise", "travel"),
+    ("Schwarzweiss", "a black and white photo"),
+    ("Testbild", "a test chart"),
+    ("Labor", "a laboratory"),
+    ("Computer", "a computer"),
 ];
 
-fn embedding(model: &OnnxModel, cache: &mut EmbeddingCache, base: &Path, rel: &str) -> Result<Vec<f32>, String> {
+fn embedding(
+    model: &OnnxModel,
+    cache: &mut EmbeddingCache,
+    base: &Path,
+    rel: &str,
+) -> Result<Vec<f32>, String> {
     let full = base.join(rel);
-    let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let mtime = std::fs::metadata(&full)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
     if let Some(v) = cache.get(model.id(), rel, mtime) {
         return Ok(v.to_vec());
     }
-    let v = image::open(&full).map_err(|e| format!("{rel}: {e}")).and_then(|im| model.run(&im).map_err(|e| e.to_string()))?;
+    let v = image::open(&full)
+        .map_err(|e| format!("{rel}: {e}"))
+        .and_then(|im| model.run(&im).map_err(|e| e.to_string()))?;
     cache.insert(model.id(), rel, mtime, v.clone());
     Ok(v)
 }
@@ -51,7 +132,11 @@ pub fn find_kind(dir: &Path, kind: Option<&str>) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "onnx") && p.with_extension("json").exists() && crate::kind_of(p).as_deref() == kind)
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "onnx")
+                && p.with_extension("json").exists()
+                && crate::kind_of(p).as_deref() == kind
+        })
         .collect();
     found.sort();
     found.into_iter().next()
@@ -59,7 +144,10 @@ pub fn find_kind(dir: &Path, kind: Option<&str>) -> Option<PathBuf> {
 
 /// Optional `tag_prompts.json`: tag -> English prompt for CLIP; overrides the built-in prompts.
 fn aliases(base: &Path) -> HashMap<String, String> {
-    std::fs::read(base.join("tag_prompts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(base.join("tag_prompts.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 /// The default vocabulary (German tag, English CLIP prompt): `default_tags.json` in the archive
@@ -70,15 +158,29 @@ fn default_tags(base: &Path) -> Vec<(String, String)> {
         tag: String,
         prompt: String,
     }
-    let custom: Vec<Entry> = std::fs::read(base.join("default_tags.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let custom: Vec<Entry> = std::fs::read(base.join("default_tags.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     if custom.is_empty() {
-        return DEFAULT_TAGS.iter().map(|(t, e)| (t.to_string(), e.to_string())).collect();
+        return DEFAULT_TAGS
+            .iter()
+            .map(|(t, e)| (t.to_string(), e.to_string()))
+            .collect();
     }
     custom.into_iter().map(|e| (e.tag, e.prompt)).collect()
 }
 
-fn neighbours(models: &Path, base: &Path, cache: &mut EmbeddingCache, query: &str, tagged: &[(String, Vec<String>)]) -> Result<Vec<(String, f32)>, String> {
-    let Some(onnx) = find_kind(models, None) else { return Ok(vec![]) };
+fn neighbours(
+    models: &Path,
+    base: &Path,
+    cache: &mut EmbeddingCache,
+    query: &str,
+    tagged: &[(String, Vec<String>)],
+) -> Result<Vec<(String, f32)>, String> {
+    let Some(onnx) = find_kind(models, None) else {
+        return Ok(vec![]);
+    };
     let model = OnnxModel::load(&onnx).map_err(|e| e.to_string())?;
     let q = embedding(&model, cache, base, query)?;
     let mut vectors = vec![];
@@ -88,11 +190,27 @@ fn neighbours(models: &Path, base: &Path, cache: &mut EmbeddingCache, query: &st
             vectors.push((v, tags.clone()));
         }
     }
-    Ok(suggest_from_neighbours(&q, &vectors, NEIGHBOURS, MIN_SIMILARITY))
+    Ok(suggest_from_neighbours(
+        &q,
+        &vectors,
+        NEIGHBOURS,
+        MIN_SIMILARITY,
+    ))
 }
 
-fn clip(models: &Path, base: &Path, cache: &mut EmbeddingCache, query: &str, vocabulary: &[(String, String)]) -> Result<Vec<(String, f32)>, String> {
-    let (Some(img), Some(txt)) = (find_kind(models, Some("clip-image")), find_kind(models, Some("clip-text"))) else { return Ok(vec![]) };
+fn clip(
+    models: &Path,
+    base: &Path,
+    cache: &mut EmbeddingCache,
+    query: &str,
+    vocabulary: &[(String, String)],
+) -> Result<Vec<(String, f32)>, String> {
+    let (Some(img), Some(txt)) = (
+        find_kind(models, Some("clip-image")),
+        find_kind(models, Some("clip-text")),
+    ) else {
+        return Ok(vec![]);
+    };
     let image_model = OnnxModel::load(&img).map_err(|e| e.to_string())?;
     let text_model = TextModel::load(&txt).map_err(|e| e.to_string())?;
     let q = embedding(&image_model, cache, base, query)?;
@@ -115,14 +233,23 @@ fn clip(models: &Path, base: &Path, cache: &mut EmbeddingCache, query: &str, voc
 
 /// Names of the people whose faces look like the faces in `query` (see `FaceStore`; people are named in the "Find people" window).
 fn people(models: &Path, base: &Path, query: &str) -> Result<Vec<(String, f32)>, String> {
-    let (Some(det), Some(emb)) = (find_kind(models, Some("face-detect")), find_kind(models, Some("face-embed"))) else { return Ok(vec![]) };
-    let store_path = base.join("filmarchiv.faces.json");
+    let (Some(det), Some(emb)) = (
+        find_kind(models, Some("face-detect")),
+        find_kind(models, Some("face-embed")),
+    ) else {
+        return Ok(vec![]);
+    };
+    let store_path = base.join("latent.faces.json");
     let mut store = FaceStore::load(&store_path);
     if store.people().next().is_none() {
         return Ok(vec![]);
     }
     let full = base.join(query);
-    let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let mtime = std::fs::metadata(&full)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
     let faces = match store.faces(query, mtime) {
         Some(f) => f.to_vec(),
         None => {
@@ -140,7 +267,9 @@ fn people(models: &Path, base: &Path, query: &str) -> Result<Vec<(String, f32)>,
     let mut best: Vec<(String, f32)> = vec![];
     for f in &faces {
         for (id, cos) in store.match_people(&f.embedding, query, FACE_MATCH) {
-            let Some(name) = store.person_name(id) else { continue };
+            let Some(name) = store.person_name(id) else {
+                continue;
+            };
             let score = 0.5 + 0.5 * ((cos - FACE_MATCH) / (0.7 - FACE_MATCH)).clamp(0.0, 1.0);
             match best.iter_mut().find(|(n, _)| n == name) {
                 Some(b) => b.1 = b.1.max(score),
@@ -155,7 +284,10 @@ fn people(models: &Path, base: &Path, query: &str) -> Result<Vec<(String, f32)>,
 fn merge(a: Vec<(String, f32)>, b: Vec<(String, f32)>) -> Vec<(String, f32)> {
     let mut out = a;
     for (tag, s) in b {
-        match out.iter_mut().find(|(t, _)| t.to_lowercase() == tag.to_lowercase()) {
+        match out
+            .iter_mut()
+            .find(|(t, _)| t.to_lowercase() == tag.to_lowercase())
+        {
             Some(e) => e.1 = (e.1.max(s) + 0.1).min(1.0),
             None => out.push((tag, s)),
         }
@@ -165,22 +297,38 @@ fn merge(a: Vec<(String, f32)>, b: Vec<(String, f32)>) -> Vec<(String, f32)> {
 }
 
 /// Suggestions (tag, score) for image `query` (archive-relative). `tagged` are the images that already have tags.
-pub fn suggest(base: &Path, query: &str, tagged: &[(String, Vec<String>)]) -> Result<Vec<(String, f32)>, String> {
+pub fn suggest(
+    base: &Path,
+    query: &str,
+    tagged: &[(String, Vec<String>)],
+) -> Result<Vec<(String, f32)>, String> {
     let models = base.join("models");
-    if find_kind(&models, None).is_none() && find_kind(&models, Some("clip-image")).is_none() && find_kind(&models, Some("face-embed")).is_none() {
+    if find_kind(&models, None).is_none()
+        && find_kind(&models, Some("clip-image")).is_none()
+        && find_kind(&models, Some("face-embed")).is_none()
+    {
         return Err(format!("No model in {}", models.display()));
     }
-    let cache_path = base.join("filmarchiv.vision.json");
+    let cache_path = base.join("latent.vision.json");
     let mut cache = EmbeddingCache::load(&cache_path);
     let prompts = aliases(base);
     // Vocabulary: the archive's tags first, then the default ones; first spelling wins.
     let mut vocabulary: Vec<(String, String)> = vec![];
-    let known = |v: &[(String, String)], tag: &str| v.iter().any(|(t, _)| t.to_lowercase() == tag.to_lowercase());
-    let own = tagged.iter().flat_map(|(_, t)| t.iter().map(|t| (t.clone(), None)));
+    let known = |v: &[(String, String)], tag: &str| {
+        v.iter()
+            .any(|(t, _)| t.to_lowercase() == tag.to_lowercase())
+    };
+    let own = tagged
+        .iter()
+        .flat_map(|(_, t)| t.iter().map(|t| (t.clone(), None)));
     let defaults = default_tags(base).into_iter().map(|(t, e)| (t, Some(e)));
     for (tag, builtin_prompt) in own.chain(defaults) {
         if !known(&vocabulary, &tag) {
-            let english = prompts.get(&tag).cloned().or(builtin_prompt).unwrap_or_else(|| tag.clone());
+            let english = prompts
+                .get(&tag)
+                .cloned()
+                .or(builtin_prompt)
+                .unwrap_or_else(|| tag.clone());
             vocabulary.push((tag, english));
         }
     }
@@ -196,7 +344,8 @@ mod tests {
     use super::*;
 
     fn temp_archive(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fa-autotag-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("latent-autotag-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -205,8 +354,15 @@ mod tests {
     fn default_tags_file_replaces_builtin() {
         let dir = temp_archive("file");
         assert_eq!(default_tags(&dir).len(), DEFAULT_TAGS.len());
-        std::fs::write(dir.join("default_tags.json"), r#"[{"tag":"Berge","prompt":"mountains"}]"#).unwrap();
-        assert_eq!(default_tags(&dir), vec![("Berge".to_string(), "mountains".to_string())]);
+        std::fs::write(
+            dir.join("default_tags.json"),
+            r#"[{"tag":"Berge","prompt":"mountains"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            default_tags(&dir),
+            vec![("Berge".to_string(), "mountains".to_string())]
+        );
         std::fs::write(dir.join("default_tags.json"), "[]").unwrap();
         assert_eq!(default_tags(&dir).len(), DEFAULT_TAGS.len());
         std::fs::write(dir.join("default_tags.json"), "not json").unwrap();

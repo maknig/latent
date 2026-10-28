@@ -56,7 +56,8 @@ mod tests {
         assert_eq!(c.get("m", "a.png", 5), Some(&[1.0, 2.0][..]));
         assert!(c.get("m", "a.png", 6).is_none());
         assert!(c.get("other", "a.png", 5).is_none());
-        let p = std::env::temp_dir().join(format!("fa-vision-cache-{}.json", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("latent-vision-cache-{}.json", std::process::id()));
         c.save(&p).unwrap();
         let l = EmbeddingCache::load(&p);
         assert_eq!(l.get("m", "a.png", 5), Some(&[1.0, 2.0][..]));

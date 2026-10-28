@@ -1,9 +1,9 @@
-//! "People": finds the faces in every archive image on a background thread (stored in `filmarchiv.faces.json`),
+//! "People": finds the faces in every archive image on a background thread (stored in `latent.faces.json`),
 //! groups similar faces and lets you name each group. Named people are suggested by "Auto tags".
 //! Needs `face-detect.onnx` and `face-embed.onnx` (+ `.json`) in `<archive>/models/`.
 use crate::images::Thumbs;
 use eframe::egui;
-use fa_vision::{
+use latent_vision::{
     embed_faces, face_crop_path, find_kind, save_crops, FaceDetector, FaceStore, OnnxModel,
     FACE_MATCH,
 };
@@ -90,7 +90,7 @@ fn mtime(p: &Path) -> u64 {
 }
 
 fn store_path(base: &Path) -> PathBuf {
-    base.join("filmarchiv.faces.json")
+    base.join("latent.faces.json")
 }
 
 /// Named people first, then clusters of unnamed faces (biggest first), then the faces that are in no cluster.
@@ -121,7 +121,7 @@ fn groups_of(store: &FaceStore) -> Result<Vec<Group>, String> {
         .collect();
     groups.sort_by_key(|g| g.name.to_lowercase());
     let vectors: Vec<Vec<f32>> = unnamed.iter().map(|(_, v)| v.to_vec()).collect();
-    let labels = fa_vision::cluster(&vectors, MIN_CLUSTER).map_err(|e| e.to_string())?;
+    let labels = latent_vision::cluster(&vectors, MIN_CLUSTER).map_err(|e| e.to_string())?;
     let mut clusters: BTreeMap<usize, Vec<FaceRef>> = BTreeMap::new();
     let mut loose = vec![];
     for ((r, _), l) in unnamed.into_iter().zip(labels) {

@@ -1,11 +1,11 @@
 [package]
-name = "filmarchiv"
+name = "latent"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fa-ui = { path = "../../crates/ui" }
-fa-data = { path = "../../crates/data" }
-fa-schema = { path = "../../crates/schema" }
+latent-ui = { path = "../../crates/ui" }
+latent-data = { path = "../../crates/data" }
+latent-schema = { path = "../../crates/schema" }
 eframe = { version = "0.31", features = ["persistence"] }
 dirs = "7.0.0"

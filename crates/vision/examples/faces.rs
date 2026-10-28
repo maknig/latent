@@ -1,4 +1,4 @@
-use fa_vision::{align, cosine, normalize, FaceDetector, Model, OnnxModel};
+use latent_vision::{align, cosine, normalize, FaceDetector, Model, OnnxModel};
 use std::path::PathBuf;
 
 // usage: faces <models dir> <image> [<image2>]

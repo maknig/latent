@@ -1,4 +1,4 @@
-//! "Auto tags": runs `fa_vision::suggest_tags` for one image on a background thread.
+//! "Auto tags": runs `latent_vision::suggest_tags` for one image on a background thread.
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -20,12 +20,24 @@ pub struct Tagger {
 impl Default for Tagger {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Tagger { tx, rx, running: false, result: None, error: None }
+        Tagger {
+            tx,
+            rx,
+            running: false,
+            result: None,
+            error: None,
+        }
     }
 }
 
 impl Tagger {
-    pub fn start(&mut self, ctx: &egui::Context, base: PathBuf, query: String, tagged: Vec<(String, Vec<String>)>) {
+    pub fn start(
+        &mut self,
+        ctx: &egui::Context,
+        base: PathBuf,
+        query: String,
+        tagged: Vec<(String, Vec<String>)>,
+    ) {
         if self.running {
             return;
         }
@@ -33,7 +45,7 @@ impl Tagger {
         self.error = None;
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let msg = match fa_vision::suggest_tags(&base, &query, &tagged) {
+            let msg = match latent_vision::suggest_tags(&base, &query, &tagged) {
                 Ok(r) => Msg::Done(query, r),
                 Err(e) => Msg::Error(e),
             };

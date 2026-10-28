@@ -1,6 +1,6 @@
 //! Faces found in the archive's images, with the people they were assigned to.
 //!
-//! Stored in `filmarchiv.faces.json` next to the data (separate from the embedding cache: face vectors are biometric data
+//! Stored in `latent.faces.json` next to the data (separate from the embedding cache: face vectors are biometric data
 //! and the file also holds the user's naming work).
 use crate::{align, normalize, FaceDetector, Model, OnnxModel, VisionError};
 use image::DynamicImage;
@@ -296,7 +296,7 @@ mod tests {
         let mut s = FaceStore::default();
         let p = s.person_id("Lara");
         s.set_faces("a.png", 3, vec![face([1.0, 0.0], Some(p))]);
-        let path = std::env::temp_dir().join(format!("fa-faces-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("latent-faces-{}.json", std::process::id()));
         s.save(&path).unwrap();
         let l = FaceStore::load(&path);
         assert_eq!(l.faces("a.png", 3).unwrap()[0].person, Some(p));

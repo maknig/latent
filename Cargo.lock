@@ -1359,74 +1359,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fa-data"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "csv",
- "fa-schema",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "fa-engine"
-version = "0.1.0"
-dependencies = [
- "fa-data",
- "fa-schema",
-]
-
-[[package]]
-name = "fa-import"
-version = "0.1.0"
-dependencies = [
- "csv",
- "fa-data",
- "fa-schema",
-]
-
-[[package]]
-name = "fa-schema"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "fa-ui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui_extras",
- "fa-data",
- "fa-engine",
- "fa-schema",
- "fa-vision",
- "image",
- "pollster",
- "rfd",
- "serde_json",
- "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "fa-vision"
-version = "0.1.0"
-dependencies = [
- "hdbscan",
- "image",
- "ort",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokenizers",
-]
-
-[[package]]
 name = "fancy-regex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1466,29 +1398,6 @@ checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
 dependencies = [
  "cfg-if",
  "libc",
-]
-
-[[package]]
-name = "filmarchiv"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "eframe",
- "fa-data",
- "fa-schema",
- "fa-ui",
-]
-
-[[package]]
-name = "filmarchiv-web"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "fa-data",
- "fa-schema",
- "fa-ui",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
@@ -2202,6 +2111,97 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "latent"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "eframe",
+ "latent-data",
+ "latent-schema",
+ "latent-ui",
+]
+
+[[package]]
+name = "latent-data"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "csv",
+ "latent-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "latent-engine"
+version = "0.1.0"
+dependencies = [
+ "latent-data",
+ "latent-schema",
+]
+
+[[package]]
+name = "latent-import"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "latent-data",
+ "latent-schema",
+]
+
+[[package]]
+name = "latent-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "latent-ui"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui_extras",
+ "image",
+ "latent-data",
+ "latent-engine",
+ "latent-schema",
+ "latent-vision",
+ "pollster",
+ "rfd",
+ "serde_json",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "latent-vision"
+version = "0.1.0"
+dependencies = [
+ "hdbscan",
+ "image",
+ "ort",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokenizers",
+]
+
+[[package]]
+name = "latent-web"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "latent-data",
+ "latent-schema",
+ "latent-ui",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
 
 [[package]]
 name = "libc"

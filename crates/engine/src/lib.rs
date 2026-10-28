@@ -1,11 +1,24 @@
 //! UI-free engine: CRUD with undo/redo, sorting and filtering over a `Store`.
-use fa_data::{format_value, Row, Store, Value};
+use latent_data::{format_value, Row, Store, Value};
 
 #[derive(Debug, Clone)]
 enum Edit {
-    Insert { table: usize, index: usize, row: Row },
-    Delete { table: usize, index: usize, row: Row },
-    Update { table: usize, id: u64, old: Vec<Value>, new: Vec<Value> },
+    Insert {
+        table: usize,
+        index: usize,
+        row: Row,
+    },
+    Delete {
+        table: usize,
+        index: usize,
+        row: Row,
+    },
+    Update {
+        table: usize,
+        id: u64,
+        old: Vec<Value>,
+        new: Vec<Value>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,7 +44,12 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(store: Store) -> Self {
-        Engine { store, undo: vec![], redo: vec![], dirty: false }
+        Engine {
+            store,
+            undo: vec![],
+            redo: vec![],
+            dirty: false,
+        }
     }
 
     fn table_index(&self, name: &str) -> Option<usize> {
@@ -45,14 +63,22 @@ impl Engine {
         let id = td.insert(t, values);
         let index = td.rows.len() - 1;
         let row = td.rows[index].clone();
-        self.push(Edit::Insert { table: ti, index, row });
+        self.push(Edit::Insert {
+            table: ti,
+            index,
+            row,
+        });
         Some(id)
     }
 
     pub fn update(&mut self, table: &str, id: u64, values: Vec<Value>) -> bool {
-        let Some(ti) = self.table_index(table) else { return false };
+        let Some(ti) = self.table_index(table) else {
+            return false;
+        };
         let t = &self.store.schema.tables[ti];
-        let Some(row) = self.store.tables[ti].get_mut(id) else { return false };
+        let Some(row) = self.store.tables[ti].get_mut(id) else {
+            return false;
+        };
         let mut new = values;
         if let Some(i) = t.id_index() {
             new[i] = Value::Int(id as i64); // id is immutable
@@ -61,16 +87,29 @@ impl Engine {
             return false;
         }
         let old = std::mem::replace(&mut row.values, new.clone());
-        self.push(Edit::Update { table: ti, id, old, new });
+        self.push(Edit::Update {
+            table: ti,
+            id,
+            old,
+            new,
+        });
         true
     }
 
     pub fn delete(&mut self, table: &str, id: u64) -> bool {
-        let Some(ti) = self.table_index(table) else { return false };
+        let Some(ti) = self.table_index(table) else {
+            return false;
+        };
         let td = &mut self.store.tables[ti];
-        let Some(index) = td.rows.iter().position(|r| r.id == id) else { return false };
+        let Some(index) = td.rows.iter().position(|r| r.id == id) else {
+            return false;
+        };
         let row = td.rows.remove(index);
-        self.push(Edit::Delete { table: ti, index, row });
+        self.push(Edit::Delete {
+            table: ti,
+            index,
+            row,
+        });
         true
     }
 
@@ -89,16 +128,26 @@ impl Engine {
 
     fn apply(&mut self, e: &Edit, forward: bool) {
         match (e, forward) {
-            (Edit::Insert { table, index, row }, false) | (Edit::Delete { table, index, row }, true) => {
+            (Edit::Insert { table, index, row }, false)
+            | (Edit::Delete { table, index, row }, true) => {
                 let rows = &mut self.store.tables[*table].rows;
                 let p = rows.iter().position(|r| r.id == row.id).unwrap_or(*index);
                 rows.remove(p.min(rows.len() - 1));
             }
-            (Edit::Insert { table, index, row }, true) | (Edit::Delete { table, index, row }, false) => {
+            (Edit::Insert { table, index, row }, true)
+            | (Edit::Delete { table, index, row }, false) => {
                 let rows = &mut self.store.tables[*table].rows;
                 rows.insert((*index).min(rows.len()), row.clone());
             }
-            (Edit::Update { table, id, old, new }, fwd) => {
+            (
+                Edit::Update {
+                    table,
+                    id,
+                    old,
+                    new,
+                },
+                fwd,
+            ) => {
                 if let Some(r) = self.store.tables[*table].get_mut(*id) {
                     r.values = if fwd { new.clone() } else { old.clone() };
                 }
@@ -108,14 +157,18 @@ impl Engine {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(e) = self.undo.pop() else { return false };
+        let Some(e) = self.undo.pop() else {
+            return false;
+        };
         self.apply(&e, false);
         self.redo.push(e);
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(e) = self.redo.pop() else { return false };
+        let Some(e) = self.redo.pop() else {
+            return false;
+        };
         self.apply(&e, true);
         self.undo.push(e);
         true
@@ -123,7 +176,9 @@ impl Engine {
 
     /// Row ids of `table` matching the query, in display order.
     pub fn view(&self, table: &str, q: &Query) -> Vec<u64> {
-        let Some(ti) = self.table_index(table) else { return vec![] };
+        let Some(ti) = self.table_index(table) else {
+            return vec![];
+        };
         let t = &self.store.schema.tables[ti];
         let cell = |r: &Row, i: usize| format_value(&r.values[i], &t.fields[i]).to_lowercase();
         let search = q.search.to_lowercase();
@@ -132,11 +187,15 @@ impl Engine {
             .iter()
             .filter(|r| {
                 (search.is_empty() || (0..t.fields.len()).any(|i| cell(r, i).contains(&search)))
-                    && q.column_filters
-                        .iter()
-                        .all(|(i, s)| *i >= t.fields.len() || cell(r, *i).contains(&s.to_lowercase()))
-                    && q.equals.iter().all(|(i, s)| *i >= t.fields.len() || s.is_empty() || cell(r, *i) == s.to_lowercase())
-                    && q.ranges.iter().all(|(i, lo, hi)| *i >= t.fields.len() || in_range(&r.values[*i], &t.fields[*i], lo, hi))
+                    && q.column_filters.iter().all(|(i, s)| {
+                        *i >= t.fields.len() || cell(r, *i).contains(&s.to_lowercase())
+                    })
+                    && q.equals.iter().all(|(i, s)| {
+                        *i >= t.fields.len() || s.is_empty() || cell(r, *i) == s.to_lowercase()
+                    })
+                    && q.ranges.iter().all(|(i, lo, hi)| {
+                        *i >= t.fields.len() || in_range(&r.values[*i], &t.fields[*i], lo, hi)
+                    })
             })
             .collect();
         if let Some((i, asc)) = q.sort.filter(|(i, _)| *i < t.fields.len()) {
@@ -149,25 +208,29 @@ impl Engine {
     }
 }
 
-fn in_range(v: &Value, f: &fa_schema::Field, lo: &str, hi: &str) -> bool {
-    let (lo, hi) = (fa_data::parse_value(lo, f).unwrap_or(Value::Null), fa_data::parse_value(hi, f).unwrap_or(Value::Null));
+fn in_range(v: &Value, f: &latent_schema::Field, lo: &str, hi: &str) -> bool {
+    let (lo, hi) = (
+        latent_data::parse_value(lo, f).unwrap_or(Value::Null),
+        latent_data::parse_value(hi, f).unwrap_or(Value::Null),
+    );
     if lo == Value::Null && hi == Value::Null {
         return true;
     }
     if *v == Value::Null {
         return false;
     }
-    (lo == Value::Null || v.cmp_value(&lo).is_ge()) && (hi == Value::Null || v.cmp_value(&hi).is_le())
+    (lo == Value::Null || v.cmp_value(&lo).is_ge())
+        && (hi == Value::Null || v.cmp_value(&hi).is_le())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fa_data::TableData;
-    use fa_schema::Schema;
+    use latent_data::TableData;
+    use latent_schema::Schema;
 
     fn engine() -> Engine {
-        let s = Schema::from_json(include_str!("../../../schemas/filmarchiv.json")).unwrap();
+        let s = Schema::from_json(include_str!("../../../schemas/latent.json")).unwrap();
         Engine::new(Store::new(s))
     }
     fn vals(e: &Engine, name: &str, iso: i64) -> Vec<Value> {
@@ -211,16 +274,31 @@ mod tests {
         for (n, i) in [("HP5", 400), ("acros", 100), ("Tri-X", 800)] {
             e.insert("roll_film", vals(&e, n, i));
         }
-        let q = Query { ranges: vec![(5, "200".into(), "".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(5, "200".into(), "".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![1, 3]);
-        let q = Query { ranges: vec![(5, "".into(), "400".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(5, "".into(), "400".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![1, 2]);
-        let q = Query { equals: vec![(2, "acros".into())], ..Default::default() };
+        let q = Query {
+            equals: vec![(2, "acros".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![2]);
         // rows default to today's date
-        let q = Query { ranges: vec![(1, "01.01.2000".into(), "".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(1, "01.01.2000".into(), "".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q).len(), 3);
-        let q = Query { ranges: vec![(1, "01.01.2999".into(), "".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(1, "01.01.2999".into(), "".into())],
+            ..Default::default()
+        };
         assert!(e.view("roll_film", &q).is_empty());
     }
 
@@ -230,11 +308,20 @@ mod tests {
         for n in ["a", "b", "c", "d"] {
             e.insert("roll_film", vals(&e, n, 400));
         }
-        let q = Query { ranges: vec![(0, "2".into(), "3".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(0, "2".into(), "3".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![2, 3]);
-        let q = Query { ranges: vec![(0, "".into(), "2".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(0, "".into(), "2".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![1, 2]);
-        let q = Query { ranges: vec![(0, "3".into(), "".into())], ..Default::default() };
+        let q = Query {
+            ranges: vec![(0, "3".into(), "".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![3, 4]);
     }
 
@@ -244,13 +331,25 @@ mod tests {
         for (n, i) in [("HP5", 400), ("acros", 100), ("Tri-X", 400)] {
             e.insert("roll_film", vals(&e, n, i));
         }
-        let q = Query { sort: Some((2, true)), ..Default::default() };
+        let q = Query {
+            sort: Some((2, true)),
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![2, 1, 3]); // case-insensitive
-        let q = Query { sort: Some((5, false)), ..Default::default() };
+        let q = Query {
+            sort: Some((5, false)),
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![1, 3, 2]); // stable on ties
-        let q = Query { search: "TRI".into(), ..Default::default() };
+        let q = Query {
+            search: "TRI".into(),
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![3]);
-        let q = Query { column_filters: vec![(5, "400".into())], ..Default::default() };
+        let q = Query {
+            column_filters: vec![(5, "400".into())],
+            ..Default::default()
+        };
         assert_eq!(e.view("roll_film", &q), vec![1, 3]);
     }
 }
