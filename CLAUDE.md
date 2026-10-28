@@ -25,6 +25,7 @@ There is no CI, justfile or Makefile.
 ```
 nix develop                          # dev shell (rust stable + wasm32, trunk, GL/wayland/X11 libs)
 cargo run -p latent [archive_dir]
+nix run . -- [archive_dir]           # flake app: cargo run --release from the flake source, target dir in ~/.cache/latent
 cargo test --workspace
 cargo clippy --workspace
 cargo fmt

@@ -13,17 +13,30 @@
         targets = [ "wasm32-unknown-unknown" ];
         extensions = [ "rust-src" "clippy" "rustfmt" ];
       };
+      runtimeLibs = pkgs.lib.makeLibraryPath (with pkgs; [
+        libxkbcommon libGL wayland vulkan-loader xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
+      ]);
+      buildLibs = with pkgs; [
+        pkg-config openssl libxkbcommon libGL wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
+        gtk3 glib
+      ];
+      # Builds from the (read-only) flake source into a cache dir; no nix package because `ort`
+      # downloads ONNX Runtime at build time, which the nix sandbox forbids.
+      latentApp = pkgs.writeShellApplication {
+        name = "latent";
+        runtimeInputs = [ rust pkgs.gcc ] ++ buildLibs;
+        text = ''
+          export LD_LIBRARY_PATH="${runtimeLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/latent/target"
+          exec cargo run --release --manifest-path ${self}/Cargo.toml -p latent -- "$@"
+        '';
+      };
     in {
+      apps.${system}.default = { type = "app"; program = "${latentApp}/bin/latent"; };
+
       devShells.${system}.default = pkgs.mkShell {
-        buildInputs = with pkgs; [
-          rust trunk wasm-bindgen-cli pkg-config openssl
-          libxkbcommon libGL wayland xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
-          gtk3 glib
-          (python3.withPackages (ps: [ ps.pillow ]))
-        ];
-        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
-          libxkbcommon libGL wayland vulkan-loader xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr
-        ]);
+        buildInputs = [ rust pkgs.trunk pkgs.wasm-bindgen-cli (pkgs.python3.withPackages (ps: [ ps.pillow ])) ] ++ buildLibs;
+        LD_LIBRARY_PATH = runtimeLibs;
       };
     };
 }
