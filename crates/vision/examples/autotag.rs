@@ -22,7 +22,7 @@ fn main() {
     println!("{} tagged images", tagged.len());
     for q in &a[1..] {
         let t = std::time::Instant::now();
-        match latent_vision::suggest_tags(&base, q, &tagged) {
+        match latent_vision::suggest_tags(&base, q, &tagged, &Default::default(), &|_, _| {}) {
             Ok(r) => println!(
                 "{q} ({:?})\n{}",
                 t.elapsed(),

@@ -33,6 +33,8 @@ pub struct Query {
     pub equals: Vec<(usize, String)>,
     /// Inclusive range as typed text (from, to), parsed per field type (numbers, dates, times).
     pub ranges: Vec<(usize, String, String)>,
+    /// Id columns: `;`-separated ids or inclusive ranges as typed, e.g. `1-3;12;15-`.
+    pub id_sets: Vec<(usize, String)>,
 }
 
 pub struct Engine {
@@ -193,6 +195,12 @@ impl Engine {
                     && q.equals.iter().all(|(i, s)| {
                         *i >= t.fields.len() || s.is_empty() || cell(r, *i) == s.to_lowercase()
                     })
+                    && q.id_sets.iter().all(|(i, s)| {
+                        *i >= t.fields.len()
+                            || parse_id_set(s).is_none_or(|set| {
+                                set.iter().any(|&(lo, hi)| (lo..=hi).contains(&r.id))
+                            })
+                    })
                     && q.ranges.iter().all(|(i, lo, hi)| {
                         *i >= t.fields.len() || in_range(&r.values[*i], &t.fields[*i], lo, hi)
                     })
@@ -206,6 +214,36 @@ impl Engine {
         }
         rows.iter().map(|r| r.id).collect()
     }
+}
+
+/// Parses `1-3;12;15-` into inclusive ranges. `None` means no filter (empty text); text that does not parse gives no ranges, so no row matches.
+fn parse_id_set(s: &str) -> Option<Vec<(u64, u64)>> {
+    let parts: Vec<&str> = s
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut out = vec![];
+    for p in parts {
+        let range = match p.split_once('-') {
+            None => p.parse().ok().map(|n| (n, n)),
+            Some((a, b)) => {
+                let bound = |x: &str, open: u64| match x.trim() {
+                    "" => Some(open),
+                    x => x.parse().ok(),
+                };
+                bound(a, 0).zip(bound(b, u64::MAX))
+            }
+        };
+        match range {
+            Some(r) => out.push(r),
+            None => return Some(vec![]),
+        }
+    }
+    Some(out)
 }
 
 fn in_range(v: &Value, f: &latent_schema::Field, lo: &str, hi: &str) -> bool {
@@ -323,6 +361,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(e.view("roll_film", &q), vec![3, 4]);
+    }
+
+    #[test]
+    fn id_set() {
+        let mut e = engine();
+        for n in 0..20 {
+            e.insert("roll_film", vals(&e, &n.to_string(), 400));
+        }
+        let ids = |s: &str| {
+            let q = Query {
+                id_sets: vec![(0, s.into())],
+                ..Default::default()
+            };
+            e.view("roll_film", &q)
+        };
+        assert_eq!(ids("1-3;12;15-17"), vec![1, 2, 3, 12, 15, 16, 17]);
+        assert_eq!(ids(" 2 ; 4 - 5 ;"), vec![2, 4, 5]);
+        assert_eq!(ids("18-"), vec![18, 19, 20]);
+        assert_eq!(ids("-2"), vec![1, 2]);
+        assert_eq!(ids("").len(), 20);
+        assert!(ids("1-x").is_empty());
     }
 
     #[test]

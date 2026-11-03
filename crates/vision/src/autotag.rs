@@ -9,6 +9,7 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Neighbours below this cosine similarity do not vote.
 const MIN_SIMILARITY: f32 = 0.5;
@@ -177,6 +178,8 @@ fn neighbours(
     cache: &mut EmbeddingCache,
     query: &str,
     tagged: &[(String, Vec<String>)],
+    cancel: &AtomicBool,
+    progress: &dyn Fn(usize, usize),
 ) -> Result<Vec<(String, f32)>, String> {
     let Some(onnx) = find_kind(models, None) else {
         return Ok(vec![]);
@@ -184,7 +187,12 @@ fn neighbours(
     let model = OnnxModel::load(&onnx).map_err(|e| e.to_string())?;
     let q = embedding(&model, cache, base, query)?;
     let mut vectors = vec![];
-    for (rel, tags) in tagged.iter().filter(|(rel, _)| rel != query) {
+    let others: Vec<_> = tagged.iter().filter(|(rel, _)| rel != query).collect();
+    for (n, (rel, tags)) in others.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        progress(n, others.len());
         // Unreadable images are skipped, not fatal.
         if let Ok(v) = embedding(&model, cache, base, rel) {
             vectors.push((v, tags.clone()));
@@ -296,11 +304,16 @@ fn merge(a: Vec<(String, f32)>, b: Vec<(String, f32)>) -> Vec<(String, f32)> {
     out
 }
 
-/// Suggestions (tag, score) for image `query` (archive-relative). `tagged` are the images that already have tags.
+/// Error text of a suggestion run stopped through its `cancel` flag.
+pub const CANCELLED: &str = "cancelled";
+
+/// Suggestions (tag, score) for image `query` (archive-relative). `tagged` are the images that already have tags. `progress(done, total)` counts the tagged images compared; setting `cancel` ends the run with `CANCELLED`.
 pub fn suggest(
     base: &Path,
     query: &str,
     tagged: &[(String, Vec<String>)],
+    cancel: &AtomicBool,
+    progress: &dyn Fn(usize, usize),
 ) -> Result<Vec<(String, f32)>, String> {
     let models = base.join("models");
     if find_kind(&models, None).is_none()
@@ -332,7 +345,10 @@ pub fn suggest(
             vocabulary.push((tag, english));
         }
     }
-    let near = neighbours(&models, base, &mut cache, query, tagged)?;
+    let near = neighbours(&models, base, &mut cache, query, tagged, cancel, progress)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CANCELLED.into());
+    }
     let by_clip = clip(&models, base, &mut cache, query, &vocabulary)?;
     cache.save(&cache_path).map_err(|e| e.to_string())?;
     let names = people(&models, base, query)?;

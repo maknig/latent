@@ -3,18 +3,18 @@
 mod autotag;
 mod cache;
 mod cluster;
-mod facestore;
 mod faces;
+mod facestore;
 mod onnx;
 mod tags;
 
-pub use autotag::{find_kind, suggest as suggest_tags, DEFAULT_TAGS};
+pub use autotag::{find_kind, suggest as suggest_tags, CANCELLED, DEFAULT_TAGS};
 pub use cache::EmbeddingCache;
 pub use cluster::{cluster, cosine, most_similar};
+pub use faces::{align, nms, normalize, Face, FaceDetector};
 pub use facestore::{
     embed_faces, face_crop_path, match_people, save_crops, FaceStore, StoredFace, FACE_MATCH,
 };
-pub use faces::{align, nms, normalize, Face, FaceDetector};
 pub use onnx::{kind_of, Manifest, OnnxModel, TextModel};
 pub use tags::{score_tags, split_tags, suggest_from_neighbours};
 

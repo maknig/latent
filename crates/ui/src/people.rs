@@ -214,6 +214,14 @@ fn job(
 }
 
 impl People {
+    pub fn task(&self) -> Option<crate::task::TaskInfo> {
+        self.progress.map(|p| crate::task::TaskInfo {
+            label: "Scanning faces",
+            progress: Some(p),
+            cancel: self.cancel.clone(),
+        })
+    }
+
     /// Opens the window and scans `all` (archive-relative image paths) in the background.
     pub fn start(&mut self, ctx: &egui::Context, base: PathBuf, all: Vec<String>) {
         self.open = true;

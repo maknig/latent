@@ -1,10 +1,13 @@
 //! "Find similar images": embeds every archive image with the ONNX model in `<archive>/models/`
 //! on a background thread (embeddings are cached in `latent.vision.json`) and lists the closest matches.
 use crate::images::Thumbs;
+use crate::task::TaskInfo;
 use eframe::egui;
 use latent_vision::{EmbeddingCache, Model, OnnxModel};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 const TOP: usize = 15;
 const PER_ROW: usize = 5;
@@ -14,6 +17,7 @@ enum Msg {
     Progress(usize, usize),
     Done(String, Vec<(String, f32)>),
     Error(String),
+    Cancelled,
 }
 
 pub struct Similar {
@@ -21,6 +25,7 @@ pub struct Similar {
     rx: Receiver<Msg>,
     /// (done, total) while a job runs.
     pub progress: Option<(usize, usize)>,
+    cancel: Arc<AtomicBool>,
     /// Query image and its matches, shown in a window.
     result: Option<(String, Vec<(String, f32)>)>,
     pub error: Option<String>,
@@ -33,6 +38,7 @@ impl Default for Similar {
             tx,
             rx,
             progress: None,
+            cancel: Default::default(),
             result: None,
             error: None,
         }
@@ -71,6 +77,7 @@ fn job(
     base: &Path,
     all: &[String],
     query: &str,
+    cancel: &AtomicBool,
     tx: &Sender<Msg>,
     ctx: &egui::Context,
 ) -> Result<Vec<(String, f32)>, String> {
@@ -94,6 +101,9 @@ fn job(
     let total = paths.len();
     let mut vectors: Vec<(String, Vec<f32>)> = Vec::with_capacity(total);
     for (n, rel) in paths.into_iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(latent_vision::CANCELLED.into());
+        }
         let full = base.join(rel);
         let mt = mtime(&full);
         let v = match cache.get(model.id(), rel, mt) {
@@ -129,16 +139,26 @@ fn job(
 }
 
 impl Similar {
+    pub fn task(&self) -> Option<TaskInfo> {
+        self.progress.map(|p| TaskInfo {
+            label: "Finding similar",
+            progress: Some(p),
+            cancel: self.cancel.clone(),
+        })
+    }
+
     pub fn start(&mut self, ctx: &egui::Context, base: PathBuf, all: Vec<String>, query: String) {
         if self.progress.is_some() {
             return;
         }
         self.progress = Some((0, all.len()));
         self.error = None;
-        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        self.cancel.store(false, Ordering::Relaxed);
+        let (tx, ctx, cancel) = (self.tx.clone(), ctx.clone(), self.cancel.clone());
         std::thread::spawn(move || {
-            let msg = match job(&base, &all, &query, &tx, &ctx) {
+            let msg = match job(&base, &all, &query, &cancel, &tx, &ctx) {
                 Ok(r) => Msg::Done(query, r),
+                Err(e) if e == latent_vision::CANCELLED => Msg::Cancelled,
                 Err(e) => Msg::Error(e),
             };
             let _ = tx.send(msg);
@@ -165,6 +185,7 @@ impl Similar {
                     self.progress = None;
                     self.error = Some(e);
                 }
+                Msg::Cancelled => self.progress = None,
             }
         }
         let mut open = true;

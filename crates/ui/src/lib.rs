@@ -6,7 +6,14 @@ use latent_engine::{Engine, Query};
 #[cfg(not(target_arch = "wasm32"))]
 use latent_schema::TableRole;
 use latent_schema::{Field, FieldType};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod grid;
 #[cfg(not(target_arch = "wasm32"))]
 mod histogram;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,6 +25,8 @@ mod print;
 mod similar;
 #[cfg(not(target_arch = "wasm32"))]
 mod tagger;
+#[cfg(not(target_arch = "wasm32"))]
+mod task;
 
 /// Decoded preview texture plus its histogram and black/white points.
 #[cfg(not(target_arch = "wasm32"))]
@@ -546,6 +555,12 @@ pub struct App {
     styled: bool,
     col_widths: std::collections::HashMap<(usize, usize), f32>,
     show_filters: bool,
+    /// Central view: table or thumbnail grid.
+    #[cfg(not(target_arch = "wasm32"))]
+    grid: bool,
+    /// Thumbnails in the table and the grid.
+    #[cfg(not(target_arch = "wasm32"))]
+    show_thumbs: bool,
     /// Open print dialog.
     print: Option<print::PrintOpts>,
     /// Pending "delete unused images" confirmation.
@@ -569,6 +584,9 @@ pub struct App {
     preview: Option<Preview>,
     #[cfg(not(target_arch = "wasm32"))]
     picker: Option<Picker>,
+    /// Running image copy: files done, total, cancel flag.
+    #[cfg(not(target_arch = "wasm32"))]
+    copy: Option<(Arc<AtomicUsize>, usize, Arc<AtomicBool>)>,
     /// Per-column filter inputs (a, b); b is the range end.
     filters: Vec<(String, String)>,
     tx: std::sync::mpsc::Sender<Msg>,
@@ -590,6 +608,10 @@ impl App {
             styled: false,
             col_widths: Default::default(),
             show_filters: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            grid: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            show_thumbs: true,
             print: None,
             #[cfg(not(target_arch = "wasm32"))]
             unused: None,
@@ -608,10 +630,41 @@ impl App {
             preview: None,
             #[cfg(not(target_arch = "wasm32"))]
             picker: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            copy: None,
             filters: vec![],
             tx,
             rx,
         }
+    }
+
+    /// True when the table view shows a thumbnail column: only for the ImageInfo table.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn thumb_column(&self) -> bool {
+        let t = &self.engine.store.schema.tables[self.table];
+        t.role == Some(TableRole::ImageInfo) && t.image_ref_index().is_some()
+    }
+
+    /// Background jobs for the status bar.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tasks(&self) -> Vec<task::TaskInfo> {
+        let copy = self
+            .copy
+            .as_ref()
+            .map(|(done, total, cancel)| task::TaskInfo {
+                label: "Copying images",
+                progress: Some((done.load(Ordering::Relaxed), *total)),
+                cancel: cancel.clone(),
+            });
+        [
+            self.people.task(),
+            self.similar.task(),
+            self.tagger.task(),
+            copy,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Show another table with a clean query and no selection.
@@ -1088,9 +1141,19 @@ impl App {
         let name = self.engine.store.schema.tables[table].name.clone();
         let (dir, tx) = (self.base_dir.clone(), self.tx.clone());
         self.status = format!("Copying {} file(s)...", files.len());
+        let (done, cancel) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        self.copy = Some((done.clone(), files.len(), cancel.clone()));
         std::thread::spawn(move || {
             let (mut ok, mut errs) = (vec![], vec![]);
             for f in files {
+                if cancel.load(Ordering::Relaxed) {
+                    errs.push("cancelled".into());
+                    break;
+                }
+                done.fetch_add(1, Ordering::Relaxed);
                 match latent_data::fs::import_image(&dir, &name, id, &f) {
                     Ok(p) => ok.push(p),
                     Err(e) => errs.push(format!("{}: {e}", f.display())),
@@ -1103,6 +1166,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn finish_copy(&mut self, table: usize, id: u64, new: Vec<String>, errs: Vec<String>) {
         let n = new.len();
+        self.copy = None;
         self.thumbs.forget_missing();
         if table == self.table && self.selected == Some(id) {
             let mut paths = self.selected_paths();
@@ -2164,11 +2228,14 @@ impl App {
                                     }
                                 });
                         }
-                        FieldType::Id
-                        | FieldType::Int
-                        | FieldType::Float
-                        | FieldType::Date
-                        | FieldType::Time => {
+                        FieldType::Id => {
+                            ui.add(
+                                egui::TextEdit::singleline(a)
+                                    .hint_text("1-3;12;15-18")
+                                    .desired_width(130.0),
+                            );
+                        }
+                        FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => {
                             ui.add(
                                 egui::TextEdit::singleline(a)
                                     .hint_text("from")
@@ -2199,15 +2266,15 @@ impl App {
         self.query.column_filters.clear();
         self.query.equals.clear();
         self.query.ranges.clear();
+        self.query.id_sets.clear();
         for (i, f) in t.fields.iter().enumerate() {
             let (a, b) = self.filters[i].clone();
             match f.ty {
                 FieldType::Enum | FieldType::Bool => self.query.equals.push((i, a)),
-                FieldType::Id
-                | FieldType::Int
-                | FieldType::Float
-                | FieldType::Date
-                | FieldType::Time => self.query.ranges.push((i, a, b)),
+                FieldType::Id => self.query.id_sets.push((i, a)),
+                FieldType::Int | FieldType::Float | FieldType::Date | FieldType::Time => {
+                    self.query.ranges.push((i, a, b))
+                }
                 _ if !a.is_empty() => self.query.column_filters.push((i, a)),
                 _ => {}
             }
@@ -2224,10 +2291,22 @@ impl App {
         let mut open = None;
         ui.style_mut().interaction.selectable_labels = false;
         let table = self.table;
+        #[cfg(not(target_arch = "wasm32"))]
+        let thumbs = self.show_thumbs && self.thumb_column();
+        #[cfg(target_arch = "wasm32")]
+        let thumbs = false;
+        let row_h = if thumbs { 44.0 } else { 20.0 };
+        #[cfg(not(target_arch = "wasm32"))]
+        let ctx = ui.ctx().clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let base = self.base_dir.clone();
         let mut builder = TableBuilder::new(ui)
             .striped(true)
             .sense(egui::Sense::click())
             .max_scroll_height(f32::INFINITY);
+        if thumbs {
+            builder = builder.column(Column::exact(60.0).resizable(false));
+        }
         for (n, &i) in cols.iter().enumerate() {
             let col = if n + 1 == cols.len() {
                 Column::remainder()
@@ -2241,6 +2320,9 @@ impl App {
         }
         builder
             .header(22.0, |mut h| {
+                if thumbs {
+                    h.col(|_| {});
+                }
                 for &i in &cols {
                     h.col(|ui| {
                         let arrow = match self.query.sort {
@@ -2297,10 +2379,23 @@ impl App {
                 let td: &TableData = &self.engine.store.tables[self.table];
                 let by_id: std::collections::HashMap<u64, &latent_data::Row> =
                     td.rows.iter().map(|r| (r.id, r)).collect();
-                body.rows(20.0, ids.len(), |mut row| {
+                body.rows(row_h, ids.len(), |mut row| {
                     let id = ids[row.index()];
                     let Some(r) = by_id.get(&id) else { return };
                     row.set_selected(self.selected == Some(id));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if thumbs {
+                        let cover = grid::cover(&t, r).map(|p| base.join(p));
+                        row.col(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(56.0, 40.0), egui::Sense::hover());
+                            if let Some(path) = cover {
+                                if ui.is_rect_visible(rect) {
+                                    self.thumbs.paint_cropped(ui, &ctx, &path, rect, 320);
+                                }
+                            }
+                        });
+                    }
                     for &i in &cols {
                         row.col(|ui| {
                             ui.label(format_value(&r.values[i], &t.fields[i]).replace('\n', " "));
@@ -2530,16 +2625,49 @@ impl eframe::App for App {
                 }
                 let total = self.engine.store.tables[self.table].rows.len();
                 ui.weak(format!("{} of {total} rows", self.ids.len()));
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.separator();
+                    ui.selectable_value(&mut self.grid, false, "Table");
+                    ui.selectable_value(&mut self.grid, true, "Grid");
+                    if !self.grid && self.thumb_column() {
+                        ui.checkbox(&mut self.show_thumbs, "Thumbnails");
+                    }
+                }
             });
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        let tasks = self.tasks();
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             let n = self.engine.store.tables[self.table].rows.len();
-            ui.label(format!(
-                "{n} rows{}  {}  ({:.0} ms/frame)",
-                if self.engine.dirty { "  (unsaved)" } else { "" },
-                self.status,
-                self.frame_ms
-            ));
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{n} rows{}  {}  ({:.0} ms/frame)",
+                    if self.engine.dirty { "  (unsaved)" } else { "" },
+                    self.status,
+                    self.frame_ms
+                ));
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    for t in &tasks {
+                        if ui.small_button("Stop").clicked() {
+                            t.cancel.store(true, Ordering::Relaxed);
+                        }
+                        let bar = match t.progress {
+                            Some((d, total)) => {
+                                egui::ProgressBar::new(d as f32 / total.max(1) as f32)
+                                    .text(format!("{} {d}/{total}", t.label))
+                            }
+                            None => egui::ProgressBar::new(0.0).animate(true).text(t.label),
+                        };
+                        ui.add(bar.desired_width(240.0));
+                    }
+                });
+            });
+            #[cfg(not(target_arch = "wasm32"))]
+            if !tasks.is_empty() {
+                ctx.request_repaint();
+            }
         });
         let tab_frame = egui::Frame::new()
             .fill(egui::Color32::from_gray(22))
@@ -2607,7 +2735,13 @@ impl eframe::App for App {
             self.sync_filters();
         }
         self.print_dialog(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| self.table_view(ui));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.grid {
+                return self.grid_view(ui);
+            }
+            self.table_view(ui)
+        });
         #[cfg(not(target_arch = "wasm32"))]
         self.preview_window(ctx);
         #[cfg(not(target_arch = "wasm32"))]
