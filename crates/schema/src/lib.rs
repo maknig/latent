@@ -278,13 +278,22 @@ impl Schema {
         };
         let mut source = text("source_image", "Bild");
         source.ty = FieldType::ImageRef;
-        Table { name: "image_info".into(), label: Some("Bildinfo".into()), role: Some(TableRole::ImageInfo), card: None, fields: vec![source, text("tags", "Tags"), text("location", "Ort")] }
+        Table {
+            name: "image_info".into(),
+            label: Some("Bildinfo".into()),
+            role: Some(TableRole::ImageInfo),
+            card: None,
+            fields: vec![source, text("tags", "Tags"), text("location", "Ort")],
+        }
     }
 
     /// Append the `image_info` table to a schema that has film tables but no such table.
     /// Returns whether anything changed.
     pub fn upgrade_image_info(&mut self) -> bool {
-        if self.role_index(TableRole::ImageInfo).is_some() || self.role_index(TableRole::Film).is_none() || self.table("image_info").is_some() {
+        if self.role_index(TableRole::ImageInfo).is_some()
+            || self.role_index(TableRole::Film).is_none()
+            || self.table("image_info").is_some()
+        {
             return false;
         }
         self.tables.push(Self::image_info_table());
@@ -298,10 +307,22 @@ impl Schema {
 
     pub fn validate(&self) -> Result<(), SchemaError> {
         let bad = |m: String| Err(SchemaError::Invalid(m));
-        if self.tables.iter().filter(|t| t.role == Some(TableRole::Enlargement)).count() > 1 {
+        if self
+            .tables
+            .iter()
+            .filter(|t| t.role == Some(TableRole::Enlargement))
+            .count()
+            > 1
+        {
             return bad("more than one enlargement table".into());
         }
-        if self.tables.iter().filter(|t| t.role == Some(TableRole::ImageInfo)).count() > 1 {
+        if self
+            .tables
+            .iter()
+            .filter(|t| t.role == Some(TableRole::ImageInfo))
+            .count()
+            > 1
+        {
             return bad("more than one image_info table".into());
         }
         let mut tnames = HashSet::new();
@@ -327,12 +348,22 @@ impl Schema {
                     }
                 }
             }
-            let refs = t.fields.iter().filter(|f| f.ty == FieldType::ImageRef).count();
+            let refs = t
+                .fields
+                .iter()
+                .filter(|f| f.ty == FieldType::ImageRef)
+                .count();
             if refs > 0 && !matches!(t.role, Some(TableRole::Enlargement | TableRole::ImageInfo)) {
-                return bad(format!("image_ref in table '{}' which is not an enlargement or image_info table", t.name));
+                return bad(format!(
+                    "image_ref in table '{}' which is not an enlargement or image_info table",
+                    t.name
+                ));
             }
             if matches!(t.role, Some(TableRole::Enlargement | TableRole::ImageInfo)) && refs != 1 {
-                return bad(format!("table '{}' needs exactly one image_ref field", t.name));
+                return bad(format!(
+                    "table '{}' needs exactly one image_ref field",
+                    t.name
+                ));
             }
             if t.role == Some(TableRole::Film) && t.images_index().is_none() {
                 return bad(format!("film table '{}' has no images field", t.name));
@@ -356,10 +387,20 @@ impl Schema {
                 if let Some(hf) = &c.height_field {
                     let f = &t.fields[t.field_index(hf).expect("checked above")];
                     if f.ty != FieldType::Enum {
-                        return bad(format!("card height_field '{}.{hf}' is not an enum", t.name));
+                        return bad(format!(
+                            "card height_field '{}.{hf}' is not an enum",
+                            t.name
+                        ));
                     }
-                    if let Some(k) = c.heights.keys().find(|k| *k != "default" && !f.options.contains(k)) {
-                        return bad(format!("card height '{k}' is not an option of '{}.{hf}'", t.name));
+                    if let Some(k) = c
+                        .heights
+                        .keys()
+                        .find(|k| *k != "default" && !f.options.contains(k))
+                    {
+                        return bad(format!(
+                            "card height '{k}' is not an option of '{}.{hf}'",
+                            t.name
+                        ));
                     }
                 }
                 if c.heights.is_empty() || c.cells.is_empty() {
@@ -395,7 +436,10 @@ mod tests {
     fn card_defaults_roundtrip_and_heights() {
         let s = Schema::from_json(CARD).unwrap();
         let c = s.tables[0].card.as_ref().unwrap();
-        assert_eq!((c.x, c.y, c.width, c.bottom_margin, c.label_width), (40.0, 20.0, 130.0, 20.0, 25.0));
+        assert_eq!(
+            (c.x, c.y, c.width, c.bottom_margin, c.label_width),
+            (40.0, 20.0, 130.0, 20.0, 25.0)
+        );
         assert_eq!(c.height_for(Some("a")), 36.0);
         assert_eq!(c.height_for(Some("b")), 58.0);
         assert_eq!(c.height_for(None), 58.0);
@@ -432,7 +476,8 @@ mod tests {
         assert_eq!(s.role_index(TableRole::Enlargement), Some(1));
         assert_eq!(s.tables[1].image_ref_index(), Some(0));
         assert_eq!(Schema::from_json(&s.to_json()).unwrap(), s);
-        let stray = r#"{"name":"x","tables":[{"name":"t","fields":[{"name":"src","type":"image_ref"}]}]}"#;
+        let stray =
+            r#"{"name":"x","tables":[{"name":"t","fields":[{"name":"src","type":"image_ref"}]}]}"#;
         assert!(Schema::from_json(stray).is_err());
         let none = r#"{"name":"x","tables":[{"name":"e","role":"enlargement","fields":[]}]}"#;
         assert!(Schema::from_json(none).is_err());
@@ -450,7 +495,8 @@ mod tests {
         s.validate().unwrap();
         assert_eq!(s.tables[1].image_ref_index(), Some(1));
         assert!(!s.upgrade_links());
-        let mut other: Schema = serde_json::from_str(r#"{"name":"x","tables":[{"name":"t","fields":[]}]}"#).unwrap();
+        let mut other: Schema =
+            serde_json::from_str(r#"{"name":"x","tables":[{"name":"t","fields":[]}]}"#).unwrap();
         assert!(!other.upgrade_links());
     }
 

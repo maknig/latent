@@ -2,13 +2,26 @@ use crate::cosine;
 
 /// Tags in a comma/newline separated cell, trimmed, without empty entries.
 pub fn split_tags(s: &str) -> Vec<String> {
-    s.split([',', '\n']).map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect()
+    s.split([',', '\n'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Tags for `query` voted by its `k` most similar tagged images: a tag's score is the share of the
 /// neighbours (cosine >= `min_sim`) carrying it, times the best similarity. Sorted by score, best first.
-pub fn suggest_from_neighbours(query: &[f32], tagged: &[(Vec<f32>, Vec<String>)], k: usize, min_sim: f32) -> Vec<(String, f32)> {
-    let mut near: Vec<(f32, &Vec<String>)> = tagged.iter().map(|(v, t)| (cosine(query, v), t)).filter(|n| n.0 >= min_sim).collect();
+pub fn suggest_from_neighbours(
+    query: &[f32],
+    tagged: &[(Vec<f32>, Vec<String>)],
+    k: usize,
+    min_sim: f32,
+) -> Vec<(String, f32)> {
+    let mut near: Vec<(f32, &Vec<String>)> = tagged
+        .iter()
+        .map(|(v, t)| (cosine(query, v), t))
+        .filter(|n| n.0 >= min_sim)
+        .collect();
     near.sort_by(|a, b| b.0.total_cmp(&a.0));
     near.truncate(k);
     let top = near.first().map_or(0.0, |n| n.0);
@@ -20,24 +33,37 @@ pub fn suggest_from_neighbours(query: &[f32], tagged: &[(Vec<f32>, Vec<String>)]
     let mut votes: Vec<(String, f32)> = vec![];
     for (sim, tags) in near {
         for t in tags {
-            match votes.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(t) || n.to_lowercase() == t.to_lowercase()) {
+            match votes
+                .iter_mut()
+                .find(|(n, _)| n.eq_ignore_ascii_case(t) || n.to_lowercase() == t.to_lowercase())
+            {
                 Some(v) => v.1 += sim,
                 None => votes.push((t.clone(), sim)),
             }
         }
     }
-    let mut out: Vec<(String, f32)> = votes.into_iter().map(|(t, s)| (t, s / total * top)).collect();
+    let mut out: Vec<(String, f32)> = votes
+        .into_iter()
+        .map(|(t, s)| (t, s / total * top))
+        .collect();
     out.sort_by(|a, b| b.1.total_cmp(&a.1));
     out
 }
 
 /// CLIP zero-shot: softmax over the vocabulary of `scale * cosine(image, text)`; sorted by probability, best first.
 pub fn score_tags(image: &[f32], texts: &[(String, Vec<f32>)], scale: f32) -> Vec<(String, f32)> {
-    let logits: Vec<f32> = texts.iter().map(|(_, t)| scale * cosine(image, t)).collect();
+    let logits: Vec<f32> = texts
+        .iter()
+        .map(|(_, t)| scale * cosine(image, t))
+        .collect();
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
     let sum: f32 = exps.iter().sum();
-    let mut out: Vec<(String, f32)> = texts.iter().zip(exps).map(|((t, _), e)| (t.clone(), e / sum)).collect();
+    let mut out: Vec<(String, f32)> = texts
+        .iter()
+        .zip(exps)
+        .map(|((t, _), e)| (t.clone(), e / sum))
+        .collect();
     out.sort_by(|a, b| b.1.total_cmp(&a.1));
     out
 }
@@ -52,7 +78,10 @@ mod tests {
 
     #[test]
     fn splits_and_trims() {
-        assert_eq!(split_tags("Lara, Montsant,\nSpanien,"), tags(&["Lara", "Montsant", "Spanien"]));
+        assert_eq!(
+            split_tags("Lara, Montsant,\nSpanien,"),
+            tags(&["Lara", "Montsant", "Spanien"])
+        );
         assert!(split_tags(" , ").is_empty());
     }
 
@@ -72,7 +101,10 @@ mod tests {
 
     #[test]
     fn clip_scores_sum_to_one_and_rank() {
-        let texts = vec![("a".to_string(), vec![1.0, 0.0]), ("b".to_string(), vec![0.0, 1.0])];
+        let texts = vec![
+            ("a".to_string(), vec![1.0, 0.0]),
+            ("b".to_string(), vec![0.0, 1.0]),
+        ];
         let r = score_tags(&[0.9, 0.1], &texts, 100.0);
         assert_eq!(r[0].0, "a");
         assert!((r.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-5);

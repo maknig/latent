@@ -13,6 +13,8 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
+mod edit;
 mod grid;
 #[cfg(not(target_arch = "wasm32"))]
 mod histogram;
@@ -32,7 +34,10 @@ mod task;
 #[cfg(not(target_arch = "wasm32"))]
 type Shown = (
     egui::TextureHandle,
-    Option<(histogram::Histogram, (f32, f32), (f32, f32))>,
+    Option<(
+        latent_image_edit_ui::histogram::Histogram,
+        latent_image_edit_ui::histogram::Markers,
+    )>,
 );
 
 /// Open image view: which film row and image, plus the text being edited.
@@ -47,19 +52,20 @@ struct Preview {
     location: String,
     /// 1.0 fits the image to the view.
     zoom: f32,
-    black: bool,
-    white: bool,
+    marks: edit::Marks,
     /// Last decoded image with its histogram and black/white points; shown while the next one loads.
     shown: Option<Shown>,
     /// Direction of the last Back/Next (-1 or 1); the image that way is preloaded.
     dir: i32,
     /// Height of the side column in the previous frame; the image viewport follows it.
     side_h: f32,
-    /// Crop mode: `[left, top, right, bottom]` as fractions of the image.
-    crop: Option<[f32; 4]>,
+    /// Edit mode: sliders, crop and dust on a 16-bit preview (see [`edit`]). The session keeps
+    /// the pending edits while the view is switched back, and ends when another image is shown.
+    edit_mode: bool,
+    edit: Option<edit::Session>,
+    /// The crop drag in progress.
     grab: Option<Grab>,
-    /// Dust mode: the spots marked so far, and the brush radius as a fraction of the image width.
-    heal: Option<Vec<images::Spot>>,
+    /// Dust brush radius as a fraction of the image width.
     brush: f32,
     /// Scroll offset of the image viewport, and the viewport rect plus whether the pointer was over it in the last frame.
     pan: egui::Vec2,
@@ -86,14 +92,13 @@ impl Preview {
             tags: String::new(),
             location: String::new(),
             zoom: 1.0,
-            black: false,
-            white: false,
+            marks: edit::Marks::default(),
             shown: None,
             dir: 1,
             side_h: 0.0,
-            crop: None,
+            edit_mode: false,
+            edit: None,
             grab: None,
-            heal: None,
             brush: 0.006,
             pan: egui::Vec2::ZERO,
             view: None,
@@ -151,10 +156,10 @@ fn heal_overlay(
     resp: &egui::Response,
     painter: &egui::Painter,
     rect: egui::Rect,
-    spots: &mut Vec<images::Spot>,
+    spots: &mut Vec<latent_image_edit::heal::Spot>,
     brush: f32,
 ) {
-    let to_spot = |p: egui::Pos2| images::Spot {
+    let to_spot = |p: egui::Pos2| latent_image_edit::heal::Spot {
         x: (p.x - rect.min.x) / rect.width(),
         y: (p.y - rect.min.y) / rect.height(),
         r: brush,
@@ -363,21 +368,29 @@ fn crop_overlay(
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(70, 130, 200);
 
-/// Marker: ring at `pos` (0..1 within `rect`) with a pill label beside it, on the side facing the image centre.
-/// `white` mirrors the colours: white ring for the black point, dark ring for the white point.
+/// What a marker points at; sets its colours.
 #[cfg(not(target_arch = "wasm32"))]
-fn annotate(painter: &egui::Painter, rect: egui::Rect, pos: (f32, f32), label: &str, white: bool) {
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    Black,
+    White,
+    Gray,
+}
+
+/// Marker: ring at `pos` (0..1 within `rect`) with a pill label beside it, on the side facing the image centre.
+/// The colours mirror the point: white ring for black, dark ring for white, mid gray for gray.
+#[cfg(not(target_arch = "wasm32"))]
+fn annotate(painter: &egui::Painter, rect: egui::Rect, pos: (f32, f32), label: &str, mark: Mark) {
     const RING: f32 = 8.0;
     const GAP: f32 = 6.0;
-    let ring = if white {
-        egui::Color32::from_gray(20)
-    } else {
-        egui::Color32::WHITE
+    let ring = match mark {
+        Mark::White => egui::Color32::from_gray(20),
+        Mark::Black => egui::Color32::WHITE,
+        Mark::Gray => egui::Color32::from_gray(128),
     };
-    let halo = if white {
-        egui::Color32::from_white_alpha(150)
-    } else {
-        egui::Color32::from_black_alpha(150)
+    let halo = match mark {
+        Mark::White | Mark::Gray => egui::Color32::from_white_alpha(150),
+        Mark::Black => egui::Color32::from_black_alpha(150),
     };
     let p = rect.min + egui::vec2(pos.0 * rect.width(), pos.1 * rect.height());
     painter.circle_stroke(p, RING, egui::Stroke::new(4.0_f32, halo));
@@ -407,13 +420,13 @@ fn annotate(painter: &egui::Painter, rect: egui::Rect, pos: (f32, f32), label: &
     painter.circle_filled(
         dot_pos,
         3.5,
-        if white {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::BLACK
+        match mark {
+            Mark::White => egui::Color32::WHITE,
+            Mark::Black => egui::Color32::BLACK,
+            Mark::Gray => egui::Color32::from_gray(128),
         },
     );
-    if !white {
+    if mark != Mark::White {
         painter.circle_stroke(
             dot_pos,
             3.5,
@@ -582,6 +595,9 @@ pub struct App {
     tagger: tagger::Tagger,
     #[cfg(not(target_arch = "wasm32"))]
     preview: Option<Preview>,
+    /// Slider presets of the image edit mode, shared by all images.
+    #[cfg(not(target_arch = "wasm32"))]
+    presets: latent_image_edit_ui::presets::PresetUi,
     #[cfg(not(target_arch = "wasm32"))]
     picker: Option<Picker>,
     /// Running image copy: files done, total, cancel flag.
@@ -628,6 +644,8 @@ impl App {
             tagger: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             preview: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            presets: edit::load_presets(),
             #[cfg(not(target_arch = "wasm32"))]
             picker: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1223,41 +1241,11 @@ impl App {
         };
     }
 
-    /// Crops the image file `rel` to `rect` (fractions of its size), keeping the original in `.originals`.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn crop_image(&mut self, rel: &str, rect: [f32; 4]) {
-        let full = self.resolve(rel);
-        self.status = match images::backup_original(&self.base_dir, &full)
-            .and_then(|()| images::crop_file(&full, rect))
-        {
-            Ok(()) => {
-                self.thumbs.invalidate(&full);
-                format!("Cropped {rel}")
-            }
-            Err(e) => format!("Crop failed: {e}"),
-        };
-    }
-
-    /// Heals the marked dust `spots` in the image file `rel`, keeping the original in `.originals`.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn heal_image(&mut self, rel: &str, spots: &[images::Spot]) {
-        let full = self.resolve(rel);
-        self.status = match images::backup_original(&self.base_dir, &full)
-            .and_then(|()| images::heal_file(&full, spots))
-        {
-            Ok(()) => {
-                self.thumbs.invalidate(&full);
-                format!("Removed {} spots from {rel}", spots.len())
-            }
-            Err(e) => format!("Dust removal failed: {e}"),
-        };
-    }
-
     /// Puts back the original of the image file `rel`.
     #[cfg(not(target_arch = "wasm32"))]
     fn restore_image(&mut self, rel: &str) {
         let full = self.resolve(rel);
-        self.status = match images::restore_original(&self.base_dir, &full) {
+        self.status = match latent_image_edit_ui::edit::restore_original(&self.base_dir, &full) {
             Ok(()) => {
                 self.thumbs.invalidate(&full);
                 format!("Restored original of {rel}")
@@ -1757,6 +1745,25 @@ impl App {
             pv.loaded = Some(rel.clone());
         }
         let full = self.resolve(&rel);
+        // Edits belong to one image: showing another one drops them.
+        if pv.edit.as_ref().is_some_and(|e| e.rel != rel) {
+            self.discard_notice(&mut pv);
+        }
+        if pv.edit_mode && pv.edit.is_none() {
+            pv.edit = Some(edit::Session::new(ctx, &self.base_dir, &rel));
+        }
+        if let Some(sess) = pv.edit.as_mut() {
+            sess.refresh(ctx);
+            match sess.poll(ctx, &self.base_dir) {
+                Some(Ok(())) => {
+                    self.thumbs.invalidate(&full);
+                    self.status = format!("Applied the edits to {rel}");
+                }
+                Some(Err(e)) => self.status = format!("Apply failed: {e}"),
+                None => {}
+            }
+        }
+        let edit_on = pv.edit_mode;
         let (mut step, mut close) = (0i32, false);
         if !ctx.wants_keyboard_input() {
             ctx.input(|i| {
@@ -1774,12 +1781,17 @@ impl App {
             images::Thumb::Ready(t) => Some(t.clone()),
             _ => None,
         };
-        let loading = ready.is_none();
+        let loading = ready.is_none()
+            || (edit_on
+                && pv
+                    .edit
+                    .as_ref()
+                    .is_some_and(|e| e.state.base.is_none() && e.state.error.is_none()));
         if let Some(t) = ready {
             let stats = self
                 .thumbs
                 .stats(&full, 2048)
-                .map(|s| (s.hist, s.black, s.white));
+                .map(|s| (s.hist.clone(), s.markers));
             pv.shown = Some((t, stats));
         }
         // Decode the next image in the direction of travel once this one is on screen, so Back/Next is quick.
@@ -1792,8 +1804,29 @@ impl App {
             let p = self.resolve(&paths[j]);
             self.thumbs.preload(ctx, &p, 2048);
         }
-        let tex = pv.shown.as_ref().map(|(t, _)| (t.id(), t.size_vec2()));
-        let stats = pv.shown.as_ref().and_then(|(_, s)| *s);
+        // Edit mode shows its own rendered preview as soon as there is one.
+        let edit_tex = pv
+            .edit
+            .as_ref()
+            .filter(|_| edit_on)
+            .and_then(|e| e.state.tex.as_ref())
+            .map(|t| (t.id(), t.size_vec2()));
+        let tex = edit_tex.or(pv.shown.as_ref().map(|(t, _)| (t.id(), t.size_vec2())));
+        let stats = pv.shown.as_ref().and_then(|(_, s)| s.clone());
+        // Edit mode marks the edited preview, View mode the thumbnail.
+        let markers = if edit_on {
+            pv.edit.as_ref().and_then(|e| e.state.markers)
+        } else {
+            stats.as_ref().map(|(_, m)| *m)
+        };
+        let colour = if edit_on {
+            pv.edit
+                .as_ref()
+                .and_then(|e| e.state.base.as_ref())
+                .is_none_or(|b| b.channels == 3)
+        } else {
+            markers.is_none_or(|m| m.gray.is_some())
+        };
         let table = &self.engine.store.schema.tables[pv.table];
         let heading = format!("{} #{}", table.label(), pv.row);
         let details: Vec<(String, String)> = self.engine.store.tables[pv.table]
@@ -1823,8 +1856,14 @@ impl App {
         /// Width of the image area relative to its height, so landscape photos fill it better.
         const LANDSCAPE: f32 = 1.3;
         // Image area (width = LANDSCAPE x height): as tall as the side column was in the last frame (tag chips included) plus a small margin.
-        let edge = (pv.side_h.max(SIDE_MIN) + MARGIN)
-            .min((ctx.screen_rect().height() - 120.0).max(SIDE_MIN));
+        let edge = if edit_on {
+            // The edit column scrolls, so its height does not follow its content.
+            (ctx.screen_rect().height() - 150.0).clamp(SIDE_MIN, 800.0)
+        } else {
+            (pv.side_h.max(SIDE_MIN) + MARGIN)
+                .min((ctx.screen_rect().height() - 120.0).max(SIDE_MIN))
+        };
+        let side_w = if edit_on { edit::SIDE_W } else { SIDE };
         let view = egui::vec2(edge * LANDSCAPE, edge);
         self.tagger.poll();
         let chips: Vec<(String, f32)> = match &self.tagger.result {
@@ -1846,9 +1885,9 @@ impl App {
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
         let base = tex.map(|(_, s)| s * ((view.x / s.x).min(view.y / s.y) * 0.99));
         let mut rotate = 0;
-        let (mut apply_crop, mut restore) = (None::<[f32; 4]>, false);
-        let mut apply_heal = None::<Vec<images::Spot>>;
-        let has_original = images::has_original(&self.base_dir, &full);
+        let (mut restore, mut toggle_edit, mut apply_edit) = (false, false, false);
+        let editing_busy = pv.edit.as_ref().is_some_and(|e| e.state.busy.is_some());
+        let has_original = latent_image_edit_ui::edit::has_original(&self.base_dir, &full);
         let (mut open, mut commit) = (true, false);
         egui::Window::new(
             full.file_name()
@@ -1859,8 +1898,8 @@ impl App {
         .open(&mut open)
         .auto_sized()
         .show(ctx, |ui| {
-            ui.set_max_width(view.x + SIDE + ui.spacing().item_spacing.x);
-            ui.horizontal(|ui| {
+            ui.set_max_width(view.x + side_w + ui.spacing().item_spacing.x);
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(pv.index > 0, egui::Button::new("◀ Back"))
                     .clicked()
@@ -1895,59 +1934,36 @@ impl App {
                 }
                 ui.weak(format!("{:.0}%", pv.zoom * 100.0));
                 ui.separator();
-                if ui.button("⟲").on_hover_text("Rotate left").clicked() {
+                if ui
+                    .add_enabled(!editing_busy, egui::Button::new("⟲"))
+                    .on_hover_text("Rotate left")
+                    .clicked()
+                {
                     rotate = -1;
                 }
-                if ui.button("⟳").on_hover_text("Rotate right").clicked() {
+                if ui
+                    .add_enabled(!editing_busy, egui::Button::new("⟳"))
+                    .on_hover_text("Rotate right")
+                    .clicked()
+                {
                     rotate = 1;
                 }
                 ui.separator();
-                if pv.crop.is_none() && pv.heal.is_none() {
-                    if ui
-                        .button("Crop")
-                        .on_hover_text("Drag on the image to cut off borders")
-                        .clicked()
-                    {
-                        pv.crop = Some([0.0, 0.0, 1.0, 1.0]);
-                    }
-                    if ui
-                        .button("Dust")
-                        .on_hover_text("Click or drag over dust and scratches to mark them")
-                        .clicked()
-                    {
-                        pv.heal = Some(vec![]);
-                    }
-                } else if let Some(spots) = pv.heal.as_mut() {
-                    ui.label("Size");
-                    ui.add(egui::Slider::new(&mut pv.brush, 0.002..=0.03).show_value(false));
-                    if ui
-                        .add_enabled(!spots.is_empty(), egui::Button::new("Undo"))
-                        .clicked()
-                    {
-                        spots.pop();
-                    }
-                    if ui
-                        .add_enabled(
-                            !spots.is_empty(),
-                            egui::Button::new(format!("Remove dust ({})", spots.len())),
-                        )
-                        .clicked()
-                    {
-                        apply_heal = Some(std::mem::take(spots));
-                    }
-                    if ui.button("Cancel").clicked() {
-                        pv.heal = None;
-                    }
-                } else {
-                    if ui.button("Apply crop").clicked() {
-                        apply_crop = pv.crop;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        pv.crop = None;
-                    }
+                if ui
+                    .selectable_label(edit_on, "Edit")
+                    .on_hover_text("Adjust, crop and remove dust")
+                    .clicked()
+                {
+                    toggle_edit = true;
+                }
+                if let Some(sess) = pv.edit.as_mut().filter(|_| edit_on) {
+                    apply_edit = edit::tools(ui, sess, &mut pv.brush);
                 }
                 if ui
-                    .add_enabled(has_original, egui::Button::new("Restore original"))
+                    .add_enabled(
+                        has_original && !editing_busy,
+                        egui::Button::new("Restore original"),
+                    )
                     .on_hover_text("Undo crop and other edits")
                     .clicked()
                 {
@@ -1990,7 +2006,11 @@ impl App {
                                 .allocate_exact_size(img.max(view), egui::Sense::click_and_drag());
                             let rect = egui::Rect::from_center_size(cell.center(), img);
                             hovered = resp.hovered();
-                            if pv.crop.is_none() && pv.heal.is_none() {
+                            let tool = edit_on
+                                && pv.edit.as_ref().is_some_and(|e| {
+                                    e.state.edits.crop.is_some() || e.dust || e.gray_tool
+                                });
+                            if !tool {
                                 // Grab the image and drag it around.
                                 if resp.dragged() {
                                     ui.scroll_with_delta(resp.drag_delta());
@@ -2013,19 +2033,38 @@ impl App {
                                 ),
                                 egui::Color32::WHITE,
                             );
-                            if let Some((_, black, white)) = &stats {
-                                if pv.black {
-                                    annotate(&painter, rect, *black, "Black", false);
+                            if let Some(m) = markers {
+                                if pv.marks.black {
+                                    annotate(&painter, rect, m.black, "Black", Mark::Black);
                                 }
-                                if pv.white {
-                                    annotate(&painter, rect, *white, "White", true);
+                                if pv.marks.white {
+                                    annotate(&painter, rect, m.white, "White", Mark::White);
+                                }
+                                let picked =
+                                    pv.edit.as_ref().filter(|_| edit_on).and_then(|e| e.gray);
+                                if let Some(g) = picked.or(m.gray).filter(|_| pv.marks.gray) {
+                                    annotate(&painter, rect, g, "Gray", Mark::Gray);
                                 }
                             }
-                            if let Some(crop) = pv.crop.as_mut() {
-                                crop_overlay(ui, &resp, &painter, rect, crop, &mut pv.grab);
-                            }
-                            if let Some(spots) = pv.heal.as_mut() {
-                                heal_overlay(ui, &resp, &painter, rect, spots, pv.brush);
+                            if let Some(sess) = pv.edit.as_mut().filter(|_| edit_on) {
+                                if sess.gray_tool {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                                    let click = resp.clicked().then(|| resp.interact_pointer_pos());
+                                    if let Some(p) = click.flatten().filter(|p| rect.contains(*p)) {
+                                        let q = (p - rect.min) / rect.size();
+                                        sess.pick_gray(q.x, q.y);
+                                    }
+                                }
+                                if let Some(crop) = sess.state.edits.crop.as_mut() {
+                                    crop_overlay(ui, &resp, &painter, rect, crop, &mut pv.grab);
+                                }
+                                if sess.dust {
+                                    let spots = &mut sess.state.edits.spots;
+                                    heal_overlay(ui, &resp, &painter, rect, spots, pv.brush);
+                                }
+                                // The preview waits while a drag is going on.
+                                sess.state.painting = pv.grab.is_some()
+                                    || (sess.dust && resp.is_pointer_button_down_on());
                             }
                             if loading {
                                 ui.put(
@@ -2046,9 +2085,16 @@ impl App {
                     pv.view = Some((out.inner_rect, hovered));
                 });
                 let side = ui.vertical(|ui| {
-                    ui.set_width(SIDE);
+                    ui.set_width(side_w);
                     ui.set_min_height(SIDE_MIN);
                     ui.label(egui::RichText::new(heading).strong());
+                    if edit_on {
+                        if let Some(sess) = pv.edit.as_mut() {
+                            let scroll_h = (edge - 190.0).max(200.0);
+                            edit::side_column(ui, sess, &mut self.presets, &mut pv.marks, scroll_h);
+                        }
+                        return;
+                    }
                     egui::Grid::new("film_info")
                         .num_columns(2)
                         .spacing([8.0, 2.0])
@@ -2061,15 +2107,14 @@ impl App {
                         });
                     ui.add_space(8.0);
                     match &stats {
-                        Some((h, _, _)) => histogram::paint(ui, h, egui::vec2(SIDE, 100.0)),
+                        Some((h, _)) => {
+                            latent_image_edit_ui::histogram::paint(ui, h, egui::vec2(SIDE, 100.0))
+                        }
                         None => {
                             ui.allocate_space(egui::vec2(SIDE, 100.0));
                         }
                     }
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut pv.black, "Black");
-                        ui.checkbox(&mut pv.white, "White");
-                    });
+                    edit::marks_row(ui, &mut pv.marks, colour);
                     ui.add_space(8.0);
                     ui.label("Ort");
                     commit |= ui
@@ -2132,7 +2177,7 @@ impl App {
                         });
                 });
                 let h = side.response.rect.height();
-                if (h - pv.side_h).abs() > 1.0 {
+                if !edit_on && (h - pv.side_h).abs() > 1.0 {
                     pv.side_h = h;
                     ctx.request_repaint();
                 }
@@ -2149,24 +2194,29 @@ impl App {
             pv.tags = format!("{}{sep}{t}", pv.tags.trim_end());
             commit = true;
         }
+        if toggle_edit {
+            pv.edit_mode = !pv.edit_mode;
+            pv.grab = None;
+        }
+        if apply_edit {
+            if let Some(sess) = pv.edit.as_mut() {
+                sess.apply(ctx, &self.base_dir);
+            }
+        }
         if rotate != 0 {
             self.rotate_image(&rel, rotate);
-            // A crop rectangle drawn before the turn no longer fits.
-            pv.crop = pv.crop.map(|_| [0.0, 0.0, 1.0, 1.0]);
-            pv.heal = pv.heal.map(|_| vec![]);
-        }
-        if let Some(c) = apply_crop {
-            self.crop_image(&rel, c);
-            pv.crop = None;
-        }
-        if let Some(spots) = apply_heal {
-            self.heal_image(&rel, &spots);
-            pv.heal = None;
+            // A crop rectangle or dust spots drawn before the turn no longer fit.
+            pv.grab = None;
+            if let Some(sess) = pv.edit.as_mut() {
+                sess.reload(ctx, &self.base_dir, true);
+            }
         }
         if restore {
             self.restore_image(&rel);
-            pv.crop = None;
-            pv.heal = None;
+            pv.grab = None;
+            if let Some(sess) = pv.edit.as_mut() {
+                sess.reload(ctx, &self.base_dir, false);
+            }
         }
         if auto_tags {
             let tagged = self.tagged_images();
@@ -2177,6 +2227,7 @@ impl App {
             self.commit_info(&rel, &pv.tags, &pv.location);
         }
         if close || !open {
+            self.discard_notice(&mut pv);
             return;
         }
         if step != 0 {
@@ -2184,11 +2235,21 @@ impl App {
             pv.dir = step;
             pv.zoom = 1.0;
             pv.pan = egui::Vec2::ZERO;
-            pv.crop = None;
-            pv.heal = None;
+            pv.grab = None;
             ctx.request_repaint();
         }
+        if let Some(sess) = pv.edit.as_mut() {
+            sess.refresh(ctx);
+        }
         self.preview = Some(pv);
+    }
+
+    /// Ends the edit session of `pv`, saying so when it held edits that were not applied.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discard_notice(&mut self, pv: &mut Preview) {
+        if let Some(sess) = pv.edit.take().filter(|e| e.dirty()) {
+            self.status = format!("Discarded unsaved edits of {}", sess.rel);
+        }
     }
 
     fn clear_filters(&mut self) {

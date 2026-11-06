@@ -14,6 +14,8 @@ rfd = "0.15"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
 latent-vision = { path = "../vision" }
+latent-image-edit = { workspace = true }
+latent-image-edit-ui = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

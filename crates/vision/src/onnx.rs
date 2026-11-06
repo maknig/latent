@@ -89,12 +89,19 @@ impl Model for OnnxModel {
                     "cls" => values[..dim].to_vec(),
                     "mean" => {
                         let tokens = values.len() / dim;
-                        (0..dim).map(|d| (0..tokens).map(|t| values[t * dim + d]).sum::<f32>() / tokens as f32).collect()
+                        (0..dim)
+                            .map(|d| {
+                                (0..tokens).map(|t| values[t * dim + d]).sum::<f32>()
+                                    / tokens as f32
+                            })
+                            .collect()
                     }
                     other => return Err(VisionError::Model(format!("unknown pool mode {other}"))),
                 })
             }
-            (Some(_), n) => Err(VisionError::Model(format!("pool needs a 3-d output, got {n}-d"))),
+            (Some(_), n) => Err(VisionError::Model(format!(
+                "pool needs a 3-d output, got {n}-d"
+            ))),
             (None, _) => Ok(values.to_vec()),
         }
     }
@@ -102,7 +109,8 @@ impl Model for OnnxModel {
 
 /// `"kind"` entry of the JSON beside `onnx` (`"clip-image"`, `"clip-text"`); `None` for a plain embedding model.
 pub fn kind_of(onnx: &Path) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(onnx.with_extension("json")).ok()?).ok()?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(onnx.with_extension("json")).ok()?).ok()?;
     v.get("kind")?.as_str().map(String::from)
 }
 
@@ -129,11 +137,22 @@ impl TextModel {
     pub fn load(onnx: &Path) -> Result<Self, VisionError> {
         let m: TextManifest = serde_json::from_slice(&std::fs::read(onnx.with_extension("json"))?)?;
         let tokenizer_path = onnx.with_file_name(&m.tokenizer);
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| VisionError::Model(format!("{}: {e}", tokenizer_path.display())))?;
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| VisionError::Model(format!("{}: {e}", tokenizer_path.display())))?;
         let err = |e: ort::Error| VisionError::Model(e.to_string());
-        let session = Session::builder().map_err(err)?.commit_from_file(onnx).map_err(err)?;
-        let id = onnx.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Self { id, tokenizer, session: Mutex::new(session) })
+        let session = Session::builder()
+            .map_err(err)?
+            .commit_from_file(onnx)
+            .map_err(err)?;
+        let id = onnx
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(Self {
+            id,
+            tokenizer,
+            session: Mutex::new(session),
+        })
     }
 
     pub fn id(&self) -> &str {
@@ -142,7 +161,10 @@ impl TextModel {
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, VisionError> {
         let err = |e: ort::Error| VisionError::Model(e.to_string());
-        let enc = self.tokenizer.encode(text, true).map_err(|e| VisionError::Model(e.to_string()))?;
+        let enc = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| VisionError::Model(e.to_string()))?;
         let ids: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
         let input = Tensor::from_array(([1i64, ids.len() as i64], ids)).map_err(err)?;
         let mut session = self.session.lock().unwrap();

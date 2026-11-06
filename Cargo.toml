@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/schema", "crates/data", "crates/engine", "crates/ui", "crates/vision", "apps/desktop", "apps/web", "apps/import"]
+members = ["crates/schema", "crates/data", "crates/engine", "crates/ui", "crates/vision", "crates/image-edit", "crates/image-edit-ui", "apps/desktop", "apps/web", "apps/import"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -8,10 +8,24 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "wasmbind"] }
 csv = "1"
 thiserror = "1"
+toml = "0.8"
+tempfile = "3"
+egui = "0.31"
+image = { version = "0.25", default-features = false, features = ["tiff", "png", "jpeg"] }
+
+latent-image-edit = { path = "crates/image-edit" }
+latent-image-edit-ui = { path = "crates/image-edit-ui" }
 
 # Image decoding and egui are far too slow unoptimised; keep our own code debuggable.
 [profile.dev]
 opt-level = 1
 
 [profile.dev.package."*"]
+opt-level = 3
+
+# The pixel code runs on every slider move; unoptimised it makes the UI freeze.
+[profile.dev.package.latent-image-edit]
+opt-level = 3
+
+[profile.dev.package.latent-image-edit-ui]
 opt-level = 3
