@@ -59,8 +59,6 @@ pub struct Session {
     /// Archive-relative path of the image.
     pub rel: String,
     pub state: EditorState,
-    /// Dust mode: dragging over the picture marks spots.
-    pub dust: bool,
     /// Gray tool: the next click on the picture picks a neutral spot.
     pub gray_tool: bool,
     /// The spot the colour balance was last taken from (fractions of the picture).
@@ -76,7 +74,6 @@ impl Session {
         Self {
             rel: rel.to_string(),
             state,
-            dust: false,
             gray_tool: false,
             gray: None,
             load,
@@ -98,7 +95,7 @@ impl Session {
         if keep {
             self.state.edits = edits;
         }
-        self.dust = false;
+        self.state.dust = false;
         self.gray_tool = false;
         self.gray = None;
         self.load = Some(editor::load_async(ctx, self.state.path.clone()));
@@ -153,7 +150,7 @@ impl Session {
     /// Throws the pending edits away.
     pub fn revert(&mut self) {
         self.state.edits = Edits::default();
-        self.dust = false;
+        self.state.dust = false;
         self.gray_tool = false;
         self.gray = None;
     }
@@ -195,16 +192,16 @@ pub fn tools(ui: &mut egui::Ui, s: &mut Session, brush: &mut f32) -> bool {
         .clicked()
     {
         s.state.edits.crop = if cropping { None } else { Some(FULL) };
-        s.dust = false;
+        s.state.dust = false;
         s.gray_tool = false;
     }
     if ui
-        .add_enabled(can, egui::SelectableLabel::new(s.dust, "Dust"))
+        .add_enabled(can, egui::SelectableLabel::new(s.state.dust, "Dust"))
         .on_hover_text("Click or drag over dust and scratches to mark them; Apply heals them")
         .clicked()
     {
-        s.dust = !s.dust;
-        if s.dust {
+        s.state.dust = !s.state.dust;
+        if s.state.dust {
             s.state.edits.crop = None;
             s.gray_tool = false;
         }
@@ -221,7 +218,7 @@ pub fn tools(ui: &mut egui::Ui, s: &mut Session, brush: &mut f32) -> bool {
         s.gray_tool = !s.gray_tool;
         if s.gray_tool {
             s.state.edits.crop = None;
-            s.dust = false;
+            s.state.dust = false;
         }
     }
     let marker = s.state.markers.and_then(|m| m.gray);
@@ -237,7 +234,7 @@ pub fn tools(ui: &mut egui::Ui, s: &mut Session, brush: &mut f32) -> bool {
             s.pick_gray(u, v);
         }
     }
-    if s.dust {
+    if s.state.dust {
         ui.label("Size");
         ui.add(egui::Slider::new(brush, BRUSH).show_value(false));
         let marked = !s.state.edits.spots.is_empty();

@@ -172,6 +172,25 @@ mod tests {
     }
 
     #[test]
+    fn the_rotated_image_agrees_with_the_rect_mapping() {
+        // The pixel at the top-left corner of a rect must land inside the mapped rect.
+        use crate::crop::to_view;
+        let img = numbered();
+        let frame = [0.0, 0.0, 1.0 / 3.0, 0.5]; // pixel 0 only
+        for deg in [90, 180, 270] {
+            let r = rotate_image(&img, deg);
+            let v = to_view(frame, deg);
+            let [w, h] = r.size;
+            let (cx, cy) = (
+                (v[0] + v[2]) / 2.0 * w as f32,
+                (v[1] + v[3]) / 2.0 * h as f32,
+            );
+            let px = r.pixels[cy as usize * w + cx as usize];
+            assert_eq!(px.r(), 0, "{deg}: pixel 0 is inside the mapped frame");
+        }
+    }
+
+    #[test]
     fn rotating_turns_the_picture_clockwise_and_swaps_the_size() {
         // 0 1 2      3 0
         // 3 4 5  ->  4 1

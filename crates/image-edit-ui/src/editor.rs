@@ -5,9 +5,13 @@
 //! format, 16 bit kept); the untouched original can be saved first with **Backup original**
 //! (`.originals/…`, latent's layout, see [`crate::edit`]).
 
+use crate::crop::Grab;
+pub use crate::crop::{Crop, FULL};
+use crate::dust;
 use crate::edit;
 use crate::histogram::{marker_points, Histogram, Markers};
 use crate::preview::{self, rotate_image, to_color_image};
+use crate::view::ZoomState;
 use egui::{ColorImage, Context, TextureHandle};
 use latent_image_edit::clarity::{clarity, Clarity, ClarityStage};
 use latent_image_edit::heal::{heal, Spot};
@@ -21,10 +25,6 @@ use std::sync::Arc;
 
 /// Longest side of the preview decoded for the editor.
 pub const PREVIEW_SIDE: u32 = 2048;
-
-/// A crop rectangle `[left, top, right, bottom]`, normalized to the picture.
-pub type Crop = [f32; 4];
-pub const FULL: Crop = [0.0, 0.0, 1.0, 1.0];
 
 /// What the user changed and has not applied yet.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -200,6 +200,42 @@ pub fn apply_file(path: &Path, edits: &Edits) -> Result<RawImage, String> {
     Ok(out)
 }
 
+/// What a background file operation of the editor does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditorOp {
+    Apply { edits: Edits, backup_first: bool },
+    Backup,
+    Restore,
+}
+
+impl EditorOp {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Apply { .. } => "Apply",
+            Self::Backup => "Backup",
+            Self::Restore => "Restore",
+        }
+    }
+}
+
+/// The work of an [`EditorOp`] on the calling thread (hosts run it on a worker). An apply
+/// returns the image written.
+pub fn run_op(root: &Path, path: &Path, op: EditorOp) -> Result<Option<RawImage>, String> {
+    match op {
+        EditorOp::Backup => edit::backup_original(root, path).map(|()| None),
+        EditorOp::Restore => edit::restore_original(root, path).map(|()| None),
+        EditorOp::Apply {
+            edits,
+            backup_first,
+        } => {
+            if backup_first {
+                edit::backup_original(root, path)?;
+            }
+            apply_file(path, &edits).map(Some)
+        }
+    }
+}
+
 /// One image open in the editor.
 pub struct EditorState {
     pub rel: String,
@@ -215,9 +251,21 @@ pub struct EditorState {
     /// Darkest, brightest and most neutral spot of the rendered preview.
     pub markers: Option<Markers>,
     pub edits: Edits,
+    /// Zoom and tool state for hosts that show the editor in a window of their own (latent-scan).
+    /// latent's image view keeps the zoom in its own state, shared with View mode.
+    pub zoom: Option<ZoomState>,
+    /// The pane's shape of the last frame (for the zoom buttons).
+    pub shape: f32,
+    pub grab: Option<Grab>,
+    /// Dust mode: dragging over the picture marks spots; the brush radius is a fraction of the
+    /// picture's width.
+    pub dust: bool,
+    pub brush: f32,
     /// The pointer is down while marking dust or dragging the crop: the preview waits until the
     /// edit is complete.
     pub painting: bool,
+    /// Asking whether to overwrite without a backup.
+    pub confirm: bool,
     renderer: Option<Renderer>,
     /// The edits the render thread is working on.
     requested: Option<Edits>,
@@ -248,7 +296,13 @@ impl EditorState {
             histogram: Histogram::default(),
             markers: None,
             edits: Edits::default(),
+            zoom: None,
+            shape: 1.0,
+            grab: None,
+            dust: false,
+            brush: dust::DEFAULT_BRUSH,
             painting: false,
+            confirm: false,
             renderer: None,
             requested: None,
             generation: 0,
@@ -276,6 +330,8 @@ impl EditorState {
     /// Back to the file as it is (after an apply or a restore): the preview is decoded again.
     pub fn reset_for_reload(&mut self, root: &Path) {
         self.edits = Edits::default();
+        self.dust = false;
+        self.confirm = false;
         self.base = None;
         self.shown = None;
         self.requested = None;
@@ -299,7 +355,7 @@ impl EditorState {
     /// shows the ones that are ready.
     pub fn refresh(&mut self, ctx: &Context) {
         self.take_rendered(ctx);
-        if self.painting {
+        if self.grab.is_some() || self.painting {
             return;
         }
         let Some(base) = &self.base else { return };
@@ -500,6 +556,124 @@ mod tests {
             }
         }
         write_image(&RawImage::new(w, h, 3, data).unwrap(), path).unwrap();
+    }
+
+    /// A state with a small flat preview loaded, as if the file (40 x 20) had been decoded.
+    fn loaded_state(name: &str) -> (EditorState, PathBuf) {
+        let root = dir(name);
+        let mut st = EditorState::new(&root, "images/x.tiff");
+        st.loaded(
+            RawImage::new(20, 10, 3, vec![20000; 600]).unwrap(),
+            [40, 20],
+        );
+        (st, root)
+    }
+
+    /// Refreshes until the render thread has delivered what was asked for.
+    fn settle(st: &mut EditorState, ctx: &Context) {
+        for _ in 0..400 {
+            st.refresh(ctx);
+            if !st.rendering() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the preview was never rendered");
+    }
+
+    #[test]
+    fn a_burst_of_edits_ends_with_the_newest_preview() {
+        let (mut st, root) = loaded_state("burst");
+        let ctx = Context::default();
+        for step in 1..=8 {
+            st.edits.adjust.exposure_ev = step as f32 * 0.1;
+            st.refresh(&ctx);
+        }
+        settle(&mut st, &ctx);
+        let want = st.edits.render_key();
+        assert_eq!(
+            st.shown.as_ref(),
+            Some(&want),
+            "the last request is what is shown"
+        );
+        assert!(st.tex.is_some());
+        // A late answer for an older picture is ignored.
+        let generation = st.generation;
+        st.loaded(RawImage::new(2, 2, 1, vec![1000; 4]).unwrap(), [4, 4]);
+        assert_eq!(st.generation, generation + 1);
+        assert!(st.shown.is_none() && !st.rendering());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_preview_shows_healed_spots_and_caches_them() {
+        let (mut st, root) = loaded_state("dust-preview");
+        let ctx = Context::default();
+        let mut base = RawImage::new(60, 40, 3, vec![20000; 60 * 40 * 3]).unwrap();
+        for c in 0..3 {
+            base.data[(20 * 60 + 30) * 3 + c] = 65535;
+        }
+        st.loaded(base, [60, 40]);
+        st.edits.spots.push(Spot {
+            x: 0.5,
+            y: 0.5,
+            r: 3.0 / 60.0,
+        });
+        let spots = st.edits.spots.clone();
+        let base = st.base.clone().unwrap();
+        let mut cache = HealCache::default();
+        let healed = cache.base(&base, &spots) as *const RawImage;
+        assert_eq!(unsafe { &*healed }.data[(20 * 60 + 30) * 3], 20000);
+        assert!(
+            std::ptr::eq(healed, cache.base(&base, &spots)),
+            "the healed copy is reused for the same spots"
+        );
+        // Through the render thread the same preview ends up in the texture.
+        settle(&mut st, &ctx);
+        assert!(st.tex.is_some() && !st.rendering());
+        assert_eq!(st.base.as_ref().unwrap().data[(20 * 60 + 30) * 3], 65535);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_file_operations_back_up_apply_and_restore() {
+        let root = dir("ops");
+        let file = root.join("x.tiff");
+        write_specked(&file, 40, 30);
+        let before = std::fs::read(&file).unwrap();
+        assert_eq!(run_op(&root, &file, EditorOp::Backup), Ok(None));
+        assert!(edit::has_original(&root, &file));
+        let edits = Edits {
+            turns: 1,
+            ..Edits::default()
+        };
+        let op = EditorOp::Apply {
+            edits,
+            backup_first: false,
+        };
+        assert_eq!(op.name(), "Apply");
+        let img = run_op(&root, &file, op).unwrap().unwrap();
+        assert_eq!((img.width, img.height), (30, 40));
+        assert_ne!(std::fs::read(&file).unwrap(), before);
+        assert_eq!(run_op(&root, &file, EditorOp::Restore), Ok(None));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        assert!(!edit::has_original(&root, &file));
+    }
+
+    #[test]
+    fn apply_can_back_up_first() {
+        let root = dir("ops-backup-first");
+        let file = root.join("y.tiff");
+        write_specked(&file, 40, 30);
+        let op = EditorOp::Apply {
+            edits: Edits {
+                turns: 2,
+                ..Edits::default()
+            },
+            backup_first: true,
+        };
+        run_op(&root, &file, op).unwrap();
+        assert!(edit::has_original(&root, &file));
     }
 
     #[test]

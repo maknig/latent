@@ -60,7 +60,6 @@ impl Histogram {
     }
 
     /// Pixels counted (the same for every channel).
-    #[cfg(test)]
     pub fn total(&self) -> u64 {
         self.r.iter().map(|&c| c as u64).sum()
     }

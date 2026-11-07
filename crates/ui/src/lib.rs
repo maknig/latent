@@ -50,8 +50,8 @@ struct Preview {
     loaded: Option<String>,
     tags: String,
     location: String,
-    /// 1.0 fits the image to the view.
-    zoom: f32,
+    /// `None` fits the image to the view.
+    zoom: Option<latent_image_edit_ui::view::ZoomState>,
     marks: edit::Marks,
     /// Last decoded image with its histogram and black/white points; shown while the next one loads.
     shown: Option<Shown>,
@@ -64,21 +64,9 @@ struct Preview {
     edit_mode: bool,
     edit: Option<edit::Session>,
     /// The crop drag in progress.
-    grab: Option<Grab>,
+    grab: Option<latent_image_edit_ui::crop::Grab>,
     /// Dust brush radius as a fraction of the image width.
     brush: f32,
-    /// Scroll offset of the image viewport, and the viewport rect plus whether the pointer was over it in the last frame.
-    pan: egui::Vec2,
-    view: Option<(egui::Rect, bool)>,
-}
-
-/// What a crop drag moves: a new rectangle from an anchor, the edges flagged `[left, top, right, bottom]`, or the whole rectangle.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy)]
-enum Grab {
-    New(egui::Pos2),
-    Edges([bool; 4]),
-    Move,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -91,7 +79,7 @@ impl Preview {
             loaded: None,
             tags: String::new(),
             location: String::new(),
-            zoom: 1.0,
+            zoom: None,
             marks: edit::Marks::default(),
             shown: None,
             dir: 1,
@@ -100,269 +88,7 @@ impl Preview {
             edit: None,
             grab: None,
             brush: 0.006,
-            pan: egui::Vec2::ZERO,
-            view: None,
         }
-    }
-}
-
-/// Screen position of the image's top-left corner: the cell starts at the viewport minus the scroll offset and the image is centred in it.
-#[cfg(not(target_arch = "wasm32"))]
-fn image_min(
-    view_min: egui::Pos2,
-    view: egui::Vec2,
-    pan: egui::Vec2,
-    img: egui::Vec2,
-) -> egui::Pos2 {
-    view_min - pan + (img.max(view) - img) / 2.0
-}
-
-/// Scroll offset that keeps the image point under `pointer` fixed when the image size changes from `old` to `new`.
-#[cfg(not(target_arch = "wasm32"))]
-fn zoom_pan(
-    view_min: egui::Pos2,
-    view: egui::Vec2,
-    pan: egui::Vec2,
-    old: egui::Vec2,
-    new: egui::Vec2,
-    pointer: egui::Pos2,
-) -> egui::Vec2 {
-    let uv = ((pointer - image_min(view_min, view, pan, old)) / old)
-        .clamp(egui::Vec2::ZERO, egui::Vec2::splat(1.0));
-    let wanted = view_min.to_vec2() + (new.max(view) - new) / 2.0 + uv * new - pointer.to_vec2();
-    wanted.clamp(egui::Vec2::ZERO, new.max(view) - view)
-}
-
-/// Sets the zoom of the open image; `base` is the image size at zoom 1. The point under `anchor` (default: the viewport centre) stays put.
-#[cfg(not(target_arch = "wasm32"))]
-fn zoom_at(
-    pv: &mut Preview,
-    base: Option<egui::Vec2>,
-    view: egui::Vec2,
-    zoom: f32,
-    anchor: Option<egui::Pos2>,
-) {
-    if let (Some(base), Some((vr, _))) = (base, pv.view) {
-        let anchor = anchor.unwrap_or_else(|| vr.center());
-        pv.pan = zoom_pan(vr.min, view, pv.pan, base * pv.zoom, base * zoom, anchor);
-    }
-    pv.zoom = zoom;
-}
-
-/// Marks dust spots by clicking or dragging over the image at `rect`; draws the marked spots and the brush.
-#[cfg(not(target_arch = "wasm32"))]
-fn heal_overlay(
-    ui: &egui::Ui,
-    resp: &egui::Response,
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    spots: &mut Vec<latent_image_edit::heal::Spot>,
-    brush: f32,
-) {
-    let to_spot = |p: egui::Pos2| latent_image_edit::heal::Spot {
-        x: (p.x - rect.min.x) / rect.width(),
-        y: (p.y - rect.min.y) / rect.height(),
-        r: brush,
-    };
-    let radius = brush * rect.width();
-    let pos = resp.interact_pointer_pos().or(resp.hover_pos());
-    if let Some(p) = pos.filter(|p| rect.contains(*p)) {
-        let last = spots
-            .last()
-            .map(|s| rect.min + egui::vec2(s.x * rect.width(), s.y * rect.height()));
-        let far = last.is_none_or(|l| l.distance(p) >= radius * 0.7);
-        if resp.drag_started() || resp.clicked() || (resp.dragged() && far) {
-            spots.push(to_spot(p));
-        }
-    }
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-        if let Some(p) = resp.hover_pos() {
-            painter.circle_stroke(
-                p,
-                radius.max(2.0),
-                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
-            );
-        }
-    }
-    for s in spots.iter() {
-        let c = rect.min + egui::vec2(s.x * rect.width(), s.y * rect.height());
-        painter.circle_stroke(
-            c,
-            (s.r * rect.width()).max(2.0),
-            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(255, 80, 80)),
-        );
-    }
-}
-
-/// Handles a crop drag on the image at `rect` and paints the dimmed outside, outline and thirds.
-#[cfg(not(target_arch = "wasm32"))]
-fn crop_overlay(
-    ui: &egui::Ui,
-    resp: &egui::Response,
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    crop: &mut [f32; 4],
-    grab: &mut Option<Grab>,
-) {
-    const HIT: f32 = 10.0;
-    const MIN: f32 = 0.02;
-    let to_norm = |p: egui::Pos2| {
-        egui::pos2(
-            ((p.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
-            ((p.y - rect.min.y) / rect.height()).clamp(0.0, 1.0),
-        )
-    };
-    let screen = |c: &[f32; 4]| {
-        egui::Rect::from_min_max(
-            rect.min + egui::vec2(c[0] * rect.width(), c[1] * rect.height()),
-            rect.min + egui::vec2(c[2] * rect.width(), c[3] * rect.height()),
-        )
-    };
-    let edges_at = |p: egui::Pos2, r: egui::Rect| -> Option<[bool; 4]> {
-        if !r.expand(HIT).contains(p) {
-            return None;
-        }
-        let e = [
-            (p.x - r.left()).abs() < HIT,
-            (p.y - r.top()).abs() < HIT,
-            (p.x - r.right()).abs() < HIT,
-            (p.y - r.bottom()).abs() < HIT,
-        ];
-        // Only the nearer of two opposite edges when the rectangle is tiny.
-        let e = [e[0], e[1], e[2] && !e[0], e[3] && !e[1]];
-        e.iter().any(|&b| b).then_some(e)
-    };
-    let r = screen(crop);
-    if let (Some(p), None) = (resp.hover_pos(), *grab) {
-        ui.ctx().set_cursor_icon(match edges_at(p, r) {
-            Some([l, t, rt, b]) if (l || rt) && (t || b) => {
-                if l == t {
-                    egui::CursorIcon::ResizeNwSe
-                } else {
-                    egui::CursorIcon::ResizeNeSw
-                }
-            }
-            Some([l, _, rt, _]) if l || rt => egui::CursorIcon::ResizeHorizontal,
-            Some(_) => egui::CursorIcon::ResizeVertical,
-            None if r.contains(p) => egui::CursorIcon::Move,
-            None => egui::CursorIcon::Crosshair,
-        });
-    }
-    if resp.drag_started() {
-        *grab = resp.interact_pointer_pos().map(|p| match edges_at(p, r) {
-            Some(e) => Grab::Edges(e),
-            None if r.contains(p) => Grab::Move,
-            None => Grab::New(to_norm(p)),
-        });
-    }
-    if resp.dragged() {
-        if let (Some(g), Some(p)) = (*grab, resp.interact_pointer_pos()) {
-            match g {
-                Grab::New(a) => {
-                    let b = to_norm(p);
-                    *crop = [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)];
-                }
-                Grab::Edges(e) => {
-                    let n = to_norm(p);
-                    for (i, &on) in e.iter().enumerate() {
-                        if on {
-                            crop[i] = if i % 2 == 0 { n.x } else { n.y };
-                        }
-                    }
-                    // Keep a minimum size and the right order by pushing the dragged edge back.
-                    if e[0] {
-                        crop[0] = crop[0].min(crop[2] - MIN);
-                    }
-                    if e[2] {
-                        crop[2] = crop[2].max(crop[0] + MIN);
-                    }
-                    if e[1] {
-                        crop[1] = crop[1].min(crop[3] - MIN);
-                    }
-                    if e[3] {
-                        crop[3] = crop[3].max(crop[1] + MIN);
-                    }
-                }
-                Grab::Move => {
-                    let d = resp.drag_delta() / rect.size();
-                    let dx = d.x.clamp(-crop[0], 1.0 - crop[2]);
-                    let dy = d.y.clamp(-crop[1], 1.0 - crop[3]);
-                    *crop = [crop[0] + dx, crop[1] + dy, crop[2] + dx, crop[3] + dy];
-                }
-            }
-        }
-    }
-    if resp.drag_stopped() {
-        *grab = None;
-    }
-    let r = screen(crop);
-    let dim = egui::Color32::from_black_alpha(150);
-    painter.rect_filled(
-        egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, r.top())),
-        0.0,
-        dim,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(egui::pos2(rect.min.x, r.bottom()), rect.max),
-        0.0,
-        dim,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(rect.min.x, r.top()),
-            egui::pos2(r.left(), r.bottom()),
-        ),
-        0.0,
-        dim,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(r.right(), r.top()),
-            egui::pos2(rect.max.x, r.bottom()),
-        ),
-        0.0,
-        dim,
-    );
-    let thin = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(70));
-    for i in 1..3 {
-        let f = i as f32 / 3.0;
-        painter.line_segment(
-            [
-                egui::pos2(r.left() + f * r.width(), r.top()),
-                egui::pos2(r.left() + f * r.width(), r.bottom()),
-            ],
-            thin,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(r.left(), r.top() + f * r.height()),
-                egui::pos2(r.right(), r.top() + f * r.height()),
-            ],
-            thin,
-        );
-    }
-    painter.rect_stroke(
-        r,
-        0.0,
-        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
-        egui::StrokeKind::Middle,
-    );
-    for c in [
-        r.left_top(),
-        r.right_top(),
-        r.left_bottom(),
-        r.right_bottom(),
-        r.center_top(),
-        r.center_bottom(),
-        r.left_center(),
-        r.right_center(),
-    ] {
-        painter.rect_filled(
-            egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0)),
-            1.0,
-            ACCENT,
-        );
     }
 }
 
@@ -1883,7 +1609,10 @@ impl App {
         let (running, tag_error) = (self.tagger.running, self.tagger.error.clone());
         let searched = matches!(&self.tagger.result, Some((q, _)) if *q == rel);
         let (mut auto_tags, mut add_tag) = (false, None::<String>);
-        let base = tex.map(|(_, s)| s * ((view.x / s.x).min(view.y / s.y) * 0.99));
+        // Shape of the image pane relative to the picture (see `view::shape`), for the zoom buttons.
+        let shape = tex.map_or(1.0, |(_, s)| {
+            latent_image_edit_ui::view::shape(view.x / view.y, s.x / s.y)
+        });
         let mut rotate = 0;
         let (mut restore, mut toggle_edit, mut apply_edit) = (false, false, false);
         let editing_busy = pv.edit.as_ref().is_some_and(|e| e.state.busy.is_some());
@@ -1914,25 +1643,28 @@ impl App {
                     step = 1;
                 }
                 ui.separator();
+                // Buttons zoom around the centre of what is shown.
+                let centre = pv.zoom.map_or([0.5, 0.5], |z| z.center);
                 if ui
-                    .add_enabled(pv.zoom > 0.34, egui::Button::new("Zoom out"))
+                    .add_enabled(pv.zoom.is_some(), egui::Button::new("Zoom out"))
                     .clicked()
                 {
-                    let z = (pv.zoom * 0.8).max(0.333);
-                    zoom_at(&mut pv, base, view, z, None);
+                    latent_image_edit_ui::view::wheel(&mut pv.zoom, 0.8, centre, shape);
                 }
                 if ui.button("Fit").clicked() {
-                    pv.zoom = 1.0;
-                    pv.pan = egui::Vec2::ZERO;
+                    pv.zoom = None;
                 }
                 if ui
-                    .add_enabled(pv.zoom < 2.99, egui::Button::new("Zoom in"))
+                    .add_enabled(
+                        pv.zoom
+                            .is_none_or(|z| z.zoom < latent_image_edit_ui::view::MAX_ZOOM),
+                        egui::Button::new("Zoom in"),
+                    )
                     .clicked()
                 {
-                    let z = (pv.zoom * 1.25).min(3.0);
-                    zoom_at(&mut pv, base, view, z, None);
+                    latent_image_edit_ui::view::wheel(&mut pv.zoom, 1.25, centre, shape);
                 }
-                ui.weak(format!("{:.0}%", pv.zoom * 100.0));
+                ui.weak(format!("{:.0}%", pv.zoom.map_or(1.0, |z| z.zoom) * 100.0));
                 ui.separator();
                 if ui
                     .add_enabled(!editing_busy, egui::Button::new("⟲"))
@@ -1973,116 +1705,89 @@ impl App {
             ui.separator();
             ui.horizontal_top(|ui| {
                 ui.allocate_ui(view, |ui| {
-                    // Wheel and pinch zoom around the pointer. This runs before the image is laid out, using the viewport of the last frame.
-                    if let (Some((_, true)), Some(p)) =
-                        (pv.view, ctx.input(|i| i.pointer.hover_pos()))
-                    {
-                        let (z, wheel) = ctx.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
-                        let z = z * (wheel * 0.002).exp();
-                        if z != 1.0 {
-                            let zoom = (pv.zoom * z).clamp(0.333, 3.0);
-                            zoom_at(&mut pv, base, view, zoom, Some(p));
-                        }
-                        if wheel != 0.0 {
-                            ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                    use latent_image_edit_ui::{canvas, crop, dust};
+                    let Some((id, s)) = tex else {
+                        ui.spinner();
+                        return;
+                    };
+                    let tool = edit_on
+                        && pv.edit.as_ref().is_some_and(|e| {
+                            e.state.edits.crop.is_some() || e.state.dust || e.gray_tool
+                        });
+                    // Wheel zoom at the pointer, middle/right drag pans; so does the primary
+                    // drag while no tool needs it.
+                    let c = canvas::show(ui, view, id, s.x / s.y, &mut pv.zoom, !tool, |_, _| {});
+                    let (rect, window, resp) = (c.rect, c.window, c.resp);
+                    if !tool {
+                        if resp.dragged() {
+                            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        } else if resp.hovered() && pv.zoom.is_some() {
+                            ctx.set_cursor_icon(egui::CursorIcon::Grab);
                         }
                     }
-                    let mut hovered = false;
-                    let out = egui::ScrollArea::both()
-                        .id_salt(&rel)
-                        .max_width(view.x)
-                        .max_height(view.y)
-                        .auto_shrink([false, false])
-                        .drag_to_scroll(false)
-                        .scroll_offset(pv.pan)
-                        .show(ui, |ui| {
-                            let Some((id, s)) = tex else {
-                                ui.spinner();
-                                return;
-                            };
-                            let fit = (view.x / s.x).min(view.y / s.y) * 0.99;
-                            let img = s * fit * pv.zoom;
-                            let (cell, resp) = ui
-                                .allocate_exact_size(img.max(view), egui::Sense::click_and_drag());
-                            let rect = egui::Rect::from_center_size(cell.center(), img);
-                            hovered = resp.hovered();
-                            let tool = edit_on
-                                && pv.edit.as_ref().is_some_and(|e| {
-                                    e.state.edits.crop.is_some() || e.dust || e.gray_tool
-                                });
-                            if !tool {
-                                // Grab the image and drag it around.
-                                if resp.dragged() {
-                                    ui.scroll_with_delta(resp.drag_delta());
-                                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-                                } else if hovered && (img.x > view.x || img.y > view.y) {
-                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                    // The whole picture on the screen: larger than the pane when zoomed in.
+                    let picture = egui::Rect::from_min_max(
+                        crop::to_screen(rect, window, [0.0, 0.0]),
+                        crop::to_screen(rect, window, [1.0, 1.0]),
+                    );
+                    let painter = ui.painter_at(rect);
+                    if let Some(m) = markers {
+                        if pv.marks.black {
+                            annotate(&painter, picture, m.black, "Black", Mark::Black);
+                        }
+                        if pv.marks.white {
+                            annotate(&painter, picture, m.white, "White", Mark::White);
+                        }
+                        let picked = pv.edit.as_ref().filter(|_| edit_on).and_then(|e| e.gray);
+                        if let Some(g) = picked.or(m.gray).filter(|_| pv.marks.gray) {
+                            annotate(&painter, picture, g, "Gray", Mark::Gray);
+                        }
+                    }
+                    if let Some(sess) = pv.edit.as_mut().filter(|_| edit_on) {
+                        if sess.gray_tool {
+                            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                            let click = resp.clicked().then(|| resp.interact_pointer_pos());
+                            if let Some(p) = click.flatten() {
+                                let n = crop::from_screen(rect, window, p);
+                                if (0.0..=1.0).contains(&n[0]) && (0.0..=1.0).contains(&n[1]) {
+                                    sess.pick_gray(n[0], n[1]);
                                 }
                             }
-                            if resp.double_clicked() {
-                                pv.zoom = 1.0;
-                                pv.pan = egui::Vec2::ZERO;
-                            }
-                            let painter = ui.painter_at(rect.intersect(ui.clip_rect()));
-                            painter.image(
-                                id,
+                        }
+                        if let Some(frame) = sess.state.edits.crop.as_mut() {
+                            let mut active = 0;
+                            crop::overlay(
+                                ui,
+                                &resp,
                                 rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
+                                window,
+                                std::slice::from_mut(frame),
+                                &mut active,
+                                &mut pv.grab,
                                 egui::Color32::WHITE,
                             );
-                            if let Some(m) = markers {
-                                if pv.marks.black {
-                                    annotate(&painter, rect, m.black, "Black", Mark::Black);
-                                }
-                                if pv.marks.white {
-                                    annotate(&painter, rect, m.white, "White", Mark::White);
-                                }
-                                let picked =
-                                    pv.edit.as_ref().filter(|_| edit_on).and_then(|e| e.gray);
-                                if let Some(g) = picked.or(m.gray).filter(|_| pv.marks.gray) {
-                                    annotate(&painter, rect, g, "Gray", Mark::Gray);
-                                }
-                            }
-                            if let Some(sess) = pv.edit.as_mut().filter(|_| edit_on) {
-                                if sess.gray_tool {
-                                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-                                    let click = resp.clicked().then(|| resp.interact_pointer_pos());
-                                    if let Some(p) = click.flatten().filter(|p| rect.contains(*p)) {
-                                        let q = (p - rect.min) / rect.size();
-                                        sess.pick_gray(q.x, q.y);
-                                    }
-                                }
-                                if let Some(crop) = sess.state.edits.crop.as_mut() {
-                                    crop_overlay(ui, &resp, &painter, rect, crop, &mut pv.grab);
-                                }
-                                if sess.dust {
-                                    let spots = &mut sess.state.edits.spots;
-                                    heal_overlay(ui, &resp, &painter, rect, spots, pv.brush);
-                                }
-                                // The preview waits while a drag is going on.
-                                sess.state.painting = pv.grab.is_some()
-                                    || (sess.dust && resp.is_pointer_button_down_on());
-                            }
-                            if loading {
-                                ui.put(
-                                    egui::Rect::from_min_size(
-                                        ui.clip_rect().min + egui::vec2(8.0, 8.0),
-                                        egui::vec2(20.0, 20.0),
-                                    ),
-                                    egui::Spinner::new(),
-                                );
-                            }
-                        });
-                    // Double-click resets the pan above; the scroll area's own offset follows in the next frame.
-                    pv.pan = if pv.zoom == 1.0 {
-                        egui::Vec2::ZERO
-                    } else {
-                        out.state.offset
-                    };
-                    pv.view = Some((out.inner_rect, hovered));
+                        }
+                        let marking = sess.state.dust
+                            && dust::overlay(
+                                ui,
+                                &resp,
+                                rect,
+                                window,
+                                &mut sess.state.edits.spots,
+                                (0, s.x / s.y, pv.brush),
+                            );
+                        // The preview waits while a drag is going on.
+                        sess.state.painting = pv.grab.is_some() || marking;
+                    }
+                    if loading {
+                        ui.put(
+                            egui::Rect::from_min_size(
+                                rect.min + egui::vec2(8.0, 8.0),
+                                egui::vec2(20.0, 20.0),
+                            ),
+                            egui::Spinner::new(),
+                        );
+                    }
                 });
                 let side = ui.vertical(|ui| {
                     ui.set_width(side_w);
@@ -2233,8 +1938,7 @@ impl App {
         if step != 0 {
             pv.index = (pv.index as i32 + step).clamp(0, paths.len() as i32 - 1) as usize;
             pv.dir = step;
-            pv.zoom = 1.0;
-            pv.pan = egui::Vec2::ZERO;
+            pv.zoom = None;
             pv.grab = None;
             ctx.request_repaint();
         }
@@ -2906,55 +2610,5 @@ impl eframe::App for App {
         {
             self.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         }
-    }
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-    use eframe::egui::{pos2, vec2};
-
-    #[test]
-    fn zoom_keeps_the_point_under_the_pointer() {
-        let (view_min, view) = (pos2(10.0, 20.0), vec2(400.0, 300.0));
-        let old = vec2(800.0, 600.0);
-        let pan = vec2(120.0, 90.0);
-        let pointer = pos2(250.0, 140.0);
-        let before = (pointer - image_min(view_min, view, pan, old)) / old;
-        for k in [0.5_f32, 1.25, 2.0] {
-            let new = old * k;
-            let p = zoom_pan(view_min, view, pan, old, new, pointer);
-            let after = (pointer - image_min(view_min, view, p, new)) / new;
-            let unclamped = new.x > view.x + 2.0 * p.x.abs()
-                && p.x > 0.0
-                && p.y > 0.0
-                && p.x < new.x - view.x
-                && p.y < new.y - view.y;
-            if unclamped {
-                assert!(
-                    (after - before).length() < 1e-4,
-                    "k={k}: {before:?} vs {after:?}"
-                );
-            }
-            assert!(
-                p.x >= 0.0
-                    && p.y >= 0.0
-                    && p.x <= (new.x - view.x).max(0.0)
-                    && p.y <= (new.y - view.y).max(0.0)
-            );
-        }
-    }
-
-    #[test]
-    fn zoom_out_to_a_small_image_resets_the_pan() {
-        let p = zoom_pan(
-            pos2(0.0, 0.0),
-            vec2(400.0, 300.0),
-            vec2(50.0, 50.0),
-            vec2(800.0, 600.0),
-            vec2(300.0, 200.0),
-            pos2(100.0, 100.0),
-        );
-        assert_eq!(p, vec2(0.0, 0.0));
     }
 }
