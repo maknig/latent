@@ -1664,7 +1664,19 @@ impl App {
                 {
                     latent_image_edit_ui::view::wheel(&mut pv.zoom, 1.25, centre, shape);
                 }
-                ui.weak(format!("{:.0}%", pv.zoom.map_or(1.0, |z| z.zoom) * 100.0));
+                // Edit mode shows the real scale (100 % = one file pixel per screen pixel).
+                let real = pv
+                    .edit
+                    .as_ref()
+                    .filter(|_| edit_on)
+                    .map(|e| e.state.pixel_zoom * ctx.pixels_per_point())
+                    .filter(|z| *z > 0.0);
+                let shown = real.unwrap_or_else(|| pv.zoom.map_or(1.0, |z| z.zoom));
+                ui.weak(format!("{:.0}%", shown * 100.0));
+                if pv.edit.as_ref().is_some_and(|e| edit_on && e.state.limited) {
+                    ui.weak("preview only")
+                        .on_hover_text("The file is too big to keep at full size in memory");
+                }
                 ui.separator();
                 if ui
                     .add_enabled(!editing_busy, egui::Button::new("⟲"))
@@ -1718,6 +1730,10 @@ impl App {
                     // drag while no tool needs it.
                     let c = canvas::show(ui, view, id, s.x / s.y, &mut pv.zoom, !tool, |_, _| {});
                     let (rect, window, resp) = (c.rect, c.window, c.resp);
+                    // Zoomed in beyond the preview, the sharp part of the file is drawn over it.
+                    if let Some(sess) = pv.edit.as_mut().filter(|_| edit_on) {
+                        sess.state.show_detail(ui, rect, window);
+                    }
                     if !tool {
                         if resp.dragged() {
                             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);

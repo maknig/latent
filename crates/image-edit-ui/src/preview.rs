@@ -81,21 +81,28 @@ pub fn rotate_image(img: &ColorImage, deg: u16) -> ColorImage {
     out
 }
 
-/// The pixels of `img` inside `frame` (normalized `[l, t, r, b]`), at least one pixel.
-pub fn region(img: &RawImage, frame: [f32; 4]) -> Option<RawImage> {
-    if img.width == 0 || img.height == 0 {
+/// The pixel rectangle `(x, y, width, height)` of a `width` x `height` image that `frame`
+/// (normalized `[l, t, r, b]`) covers, at least one pixel.
+pub fn region_rect(width: u32, height: u32, frame: [f32; 4]) -> Option<(u32, u32, u32, u32)> {
+    if width == 0 || height == 0 {
         return None;
     }
-    let (w, h) = (img.width as f32, img.height as f32);
+    let (w, h) = (width as f32, height as f32);
     let x = (frame[0] * w).floor().clamp(0.0, w - 1.0) as u32;
     let y = (frame[1] * h).floor().clamp(0.0, h - 1.0) as u32;
-    let cw = (((frame[2] - frame[0]) * w).ceil() as u32).clamp(1, img.width - x);
-    let ch = (((frame[3] - frame[1]) * h).ceil() as u32).clamp(1, img.height - y);
+    let cw = (((frame[2] - frame[0]) * w).ceil() as u32).clamp(1, width - x);
+    let ch = (((frame[3] - frame[1]) * h).ceil() as u32).clamp(1, height - y);
+    Some((x, y, cw, ch))
+}
+
+/// The pixels of `img` inside `frame` (normalized `[l, t, r, b]`), at least one pixel.
+pub fn region(img: &RawImage, frame: [f32; 4]) -> Option<RawImage> {
+    let (x, y, width, height) = region_rect(img.width, img.height, frame)?;
     Crop {
         x,
         y,
-        width: cw,
-        height: ch,
+        width,
+        height,
     }
     .of(img)
     .ok()

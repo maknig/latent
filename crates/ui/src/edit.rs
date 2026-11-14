@@ -38,7 +38,7 @@ pub fn marks_row(ui: &mut egui::Ui, marks: &mut Marks, colour: bool) {
     });
 }
 
-type Loaded = Result<(RawImage, [u32; 2]), String>;
+type Loaded = Result<editor::Loaded, String>;
 
 /// Where the user's slider presets live: `<config dir>/latent/presets.toml`.
 pub fn load_presets() -> PresetUi {
@@ -108,7 +108,7 @@ impl Session {
             if let Ok(result) = rx.try_recv() {
                 self.load = None;
                 match result {
-                    Ok((preview, size)) => self.state.loaded(preview, size),
+                    Ok(l) => self.state.loaded_from(l),
                     Err(e) => {
                         self.state.busy = None;
                         self.state.error = Some(e);
