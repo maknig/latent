@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Latent
+Comment=Analog film archive
+Exec=latent %f
+Icon=latent
+Categories=Graphics;Photography;
+Terminal=false

@@ -14,7 +14,7 @@ Cargo workspace (resolver 2):
 - `crates/image-edit-ui` (`latent-image-edit-ui`): egui parts of it, native-only: `editor` (`Edits`, `EditorState` with the 2048 px 16-bit preview, the "latest wins" render thread and heal cache, `apply_file`, `load_async` / `apply_async`), `sliders` (grouped sliders, preset row), `presets`, `form`, `histogram`, `preview`, `edit` (`.originals` backup/restore). Copied from latent-scan's `latent-image-edit-ui` minus its editor window and canvas (the image view here draws the picture and overlays itself); keep in sync.
 - `crates/vision` (`latent-vision`): native-only ONNX models (`ort`, `Model` trait, `OnnxModel`), cosine/HDBSCAN, embedding cache. Models live in `<archive>/models/<name>.onnx` + `<name>.json` (`size`, optional `mean`, `std`, `output`); embeddings are cached in `latent.vision.json`. UI: image strip context menu "Find similar images" (`crates/ui/src/similar.rs`). Image view "Auto tags" (`crates/ui/src/tagger.rs`) merges tags of similar tagged images with CLIP zero-shot scores of the archive's tags; CLIP needs `clip-image.onnx`+`.json` (`"kind":"clip-image"`), `clip-text.onnx`+`.json` (`"kind":"clip-text"`) and `tokenizer.json` in `models/`, optional `tag_prompts.json` (tag -> English prompt). The CLIP vocabulary besides the archive's tags is `default_tags.json` in the archive (`[{"tag","prompt"}]`, generated once from a vision LLM by `scripts/vlm_tags.py`), else the built-in `DEFAULT_TAGS`. Models with a `kind` are skipped by the plain embedding lookup.
   - **People** (View > People..., `crates/ui/src/people.rs`, `crates/vision/src/faces.rs`+`facestore.rs`): InsightFace SCRFD detector `face-detect.onnx`+`.json` (`"kind":"face-detect"`, `size` 640) and ArcFace embedder `face-embed.onnx`+`.json` (`"kind":"face-embed"`, `size` 112), e.g. `det_500m` and `w600k_mbf` from buffalo_s (InsightFace weights: non-commercial use only). The scan stores faces (box, embedding, person) and names in `latent.faces.json` (biometric data, keep it out of git) and aligned crops in `.thumbs/faces/`. Unnamed faces are clustered with HDBSCAN so a group can be named once; Auto tags then adds the names of matching people (`FACE_MATCH` cosine 0.4: same person about 0.5, different people below 0.3). Examples: `cargo run -p latent-vision --example faces -- <models> <image> [<image2>]`.
-- `apps/desktop` (package `latent`): native eframe app.
+- `apps/desktop` (package `latent`): native eframe app. `assets/` holds the icon (png, Windows ico via `build.rs`/winresource, Linux `.desktop`), `macos/Info.plist` the bundle plist. Startup errors also show a dialog (no terminal when started from Finder/Explorer).
 - `apps/web` (`latent-web`): wasm build via trunk (`dist` is gitignored).
 - `apps/import` (`latent-import`): one-off importer from the old Qt data.
 - `schemas/latent.json`: default schema (tables `roll_film`, `plan_film`, `enlargement`), embedded with `include_str!` in the desktop app and the importer.
@@ -22,7 +22,7 @@ Cargo workspace (resolver 2):
 
 ## Commands
 
-There is no CI, justfile or Makefile.
+There is no justfile or Makefile. GitHub Actions: `ci.yml` (fmt, clippy `-D warnings`, test on Ubuntu, every push and PR) and `release.yml` (on tag `v*` or by hand: macOS arm64 `.app` zip, Windows x86_64 zip, Linux x86_64 tar.gz, each built on its own runner; a tag also creates the GitHub Release). Release: `git tag v0.1.0 && git push origin v0.1.0`. No Intel Mac build: `ort` has no prebuilt ONNX Runtime for it.
 
 ```
 nix develop                          # dev shell (rust stable + wasm32, trunk, GL/wayland/X11 libs)
@@ -32,6 +32,7 @@ cargo test --workspace
 cargo clippy --workspace
 cargo fmt
 cd apps/web && trunk serve
+scripts/bundle-macos.sh [version]      # target/release/Latent.app, ad-hoc signed (icon from apps/desktop/assets/icon.png)
 cargo run -p latent-import -- <src> <dst> [--apply] [--force]
 ```
 
